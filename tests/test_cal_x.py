@@ -86,9 +86,9 @@ def test_shape_detection():
                 
                 # 在图像上绘制边长信息
                 cv2.putText(result_frame, f"Size: {x:.2f}cm", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
                 cv2.putText(result_frame, f"Distance: {D:.2f}cm", (10, 70), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1)
             else:
                 print("未检测到形状")
             

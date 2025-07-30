@@ -3,71 +3,112 @@ import cv2
 import numpy as np
 
 class ShapeDetector:
+    def _detect_polygonal(self, approx, edges):
+        num_sides = len(approx)
+        print("num_sides:", num_sides)
+        
+        # 霍夫直线检测
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, 50)
+        num_hough_lines = 0
+        if lines is not None:
+            thetas = lines[:, 0, 1]
+            thetas = np.sort(thetas)
+            groups = []
+            current = [thetas[0]]
+            for t in thetas[1:]:
+                if t - current[-1] < 0.1:
+                    current.append(t)
+                else:
+                    groups.append(current)
+                    current = [t]
+            groups.append(current)
+            num_hough_lines = len(groups)
+
+        print("num_hough_lines:", num_hough_lines)
+
+        # 判断是否为三角形或正方形
+        # 只要霍夫直线数量或多边形边数其中一个满足条件即可
+        if num_sides == 3 or num_hough_lines == 3:
+            shape = "triangle"
+            shape_params = approx.reshape(-1, 2)
+            return shape, shape_params
+        elif num_sides == 4 or num_hough_lines == 4:
+            shape = "square"
+            shape_params = approx.reshape(-1, 2)
+            return shape, shape_params
+        
+        return None, None
+
+    def _detect_circle(self, contour, blurred):
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            return None, None
+        circularity = 4 * np.pi * area / (perimeter ** 2)
+        if circularity <= 0.75:
+            return None, None
+
+        (cx, cy), mr = cv2.minEnclosingCircle(contour)
+        cx, cy, mr = int(cx), int(cy), int(mr)
+
+        h_circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=50,
+                                     param1=50, param2=25, minRadius=int(mr * 0.5), maxRadius=int(mr * 1.5))
+        best_center = (cx, cy)
+        best_radius = mr
+        if h_circles is not None:
+            h_circles = np.round(h_circles[0, :]).astype("int")
+            best_score = float('inf')
+            for (hx, hy, hr) in h_circles:
+                dist = np.sqrt((hx - cx) ** 2 + (hy - cy) ** 2)
+                rel_dist = dist / mr if mr > 0 else 0
+                rel_r = abs(hr - mr) / mr if mr > 0 else 0
+                score = rel_dist + rel_r
+                if score < best_score:
+                    best_score = score
+                    best_center = (hx, hy)
+                    best_radius = hr
+            if best_score >= 0.3:
+                best_center = (cx, cy)
+                best_radius = mr
+
+        shape_params = {"center": best_center, "radius": best_radius}
+        return "circle", shape_params
+
     def detect_shape(self, frame):
-        # 转换为灰度图
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # 阈值化找到黑色形状（白色背景）
         _, thresh = cv2.threshold(gray, 75, 255, cv2.THRESH_BINARY_INV)
-        
-        # 查找轮廓
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         if not contours:
             return None, 0, None
-        
-        # 找到目标形状轮廓（最大的内部轮廓）
         target_contour = max(contours, key=cv2.contourArea)
-        
-        # 逼近轮廓
         epsilon = 0.02 * cv2.arcLength(target_contour, True)
         approx = cv2.approxPolyDP(target_contour, epsilon, True)
-        
-        num_sides = len(approx)
-        shape_params = None
-        
-        if num_sides == 3:
-            shape = "triangle"
-            # 返回三个角点
-            shape_params = approx.reshape(-1, 2)
-        elif num_sides == 4:
-            shape = "square"
-            # 返回四个角点
-            shape_params = approx.reshape(-1, 2)
-        else:
-            # 检查圆形使用圆度
-            area = cv2.contourArea(target_contour)
-            perimeter = cv2.arcLength(target_contour, True)
-            if perimeter == 0:
-                shape = None
-            else:
-                circularity = 4 * np.pi * area / (perimeter ** 2)
-                if circularity > 0.8:
-                    shape = "circle"
-                    # 返回圆心和半径
-                    (x, y), radius = cv2.minEnclosingCircle(target_contour)
-                    shape_params = {"center": (int(x), int(y)), "radius": int(radius)}
-                else:
-                    shape = None
-        
+
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 50, 150)
+
+        shape, shape_params = self._detect_polygonal(approx, edges)
+        num_sides = len(approx) if shape in ["triangle", "square"] else 0
+        if shape is None:
+            shape, shape_params = self._detect_circle(target_contour, blurred)
+
         if shape is None:
             return None, 0, None
-        
-        # 计算像素尺寸（边长或直径）
+
         if shape == "circle":
             x_pix = 2 * shape_params["radius"]
         else:
-            # 对于三角形或正方形，计算平均边长
             sides = []
+            points = shape_params
             for i in range(num_sides):
-                p1 = approx[i][0]
-                p2 = approx[(i+1) % num_sides][0]
+                p1 = points[i]
+                p2 = points[(i + 1) % num_sides]
                 side = np.linalg.norm(p1 - p2)
                 sides.append(side)
             x_pix = np.mean(sides)
-        
+
         return shape, x_pix, shape_params
-    
+
     def draw_shape(self, frame, shape_type, shape_params, color=(0, 255, 0), thickness=2):
         """
         在画面上绘制检测到的形状

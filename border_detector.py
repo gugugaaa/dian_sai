@@ -43,7 +43,7 @@ class BorderDetector:
     
     def post_crop(self, frame, corners, inset_pixels=5):
         """
-        基于A4纸角点向内裁切，避免边框干扰形状检测
+        基于A4纸角点的外接矩形裁切，然后向内收缩
         
         Args:
             frame: 输入图像
@@ -57,37 +57,44 @@ class BorderDetector:
         if corners is None or len(corners) != 4:
             return frame, corners
         
-        # 向内收缩角点
-        top_left, top_right, bottom_right, bottom_left = corners
+        print("Original:", frame.shape)
         
-        # 计算向内偏移的角点
-        # 左上角向右下偏移
-        new_top_left = top_left + [inset_pixels, inset_pixels]
-        # 右上角向左下偏移  
-        new_top_right = top_right + [-inset_pixels, inset_pixels]
-        # 右下角向左上偏移
-        new_bottom_right = bottom_right + [-inset_pixels, -inset_pixels]
-        # 左下角向右上偏移
-        new_bottom_left = bottom_left + [inset_pixels, -inset_pixels]
+        # 计算四个角点的外接矩形
+        min_x = int(np.min(corners[:, 0]))
+        max_x = int(np.max(corners[:, 0]))
+        min_y = int(np.min(corners[:, 1]))
+        max_y = int(np.max(corners[:, 1]))
         
-        # 确保新角点在图像范围内
+        # 确保边界在图像范围内
         h, w = frame.shape[:2]
-        new_corners = np.array([new_top_left, new_top_right, new_bottom_right, new_bottom_left])
-        new_corners[:, 0] = np.clip(new_corners[:, 0], 0, w-1)
-        new_corners[:, 1] = np.clip(new_corners[:, 1], 0, h-1)
+        min_x = max(0, min_x)
+        max_x = min(w, max_x)
+        min_y = max(0, min_y)
+        max_y = min(h, max_y)
         
-        # 计算裁切区域的边界
-        min_x = int(np.min(new_corners[:, 0]))
-        max_x = int(np.max(new_corners[:, 0]))
-        min_y = int(np.min(new_corners[:, 1]))
-        max_y = int(np.max(new_corners[:, 1]))
+        # 第一步：裁切外接矩形
+        rect_crop = frame[min_y:max_y, min_x:max_x]
         
-        # 裁切图像
-        cropped_frame = frame[min_y:max_y, min_x:max_x]
+        # 第二步：在矩形基础上向内收缩 inset_pixels
+        crop_h, crop_w = rect_crop.shape[:2]
+        
+        # 计算收缩后的边界，确保不超出图像范围
+        inset_min_x = max(0, inset_pixels)
+        inset_max_x = min(crop_w, crop_w - inset_pixels)
+        inset_min_y = max(0, inset_pixels)
+        inset_max_y = min(crop_h, crop_h - inset_pixels)
+        
+        # 最终裁切
+        cropped_frame = rect_crop[inset_min_y:inset_max_y, inset_min_x:inset_max_x]
         
         # 调整角点坐标到新图像坐标系
-        adjusted_corners = new_corners.copy()
+        adjusted_corners = corners.copy()
+        # 先减去外接矩形的偏移
         adjusted_corners[:, 0] -= min_x
         adjusted_corners[:, 1] -= min_y
+        # 再减去内收缩的偏移
+        adjusted_corners[:, 0] -= inset_min_x
+        adjusted_corners[:, 1] -= inset_min_y
         
+        print("Cropped:", cropped_frame.shape)
         return cropped_frame, adjusted_corners.astype(np.float32)

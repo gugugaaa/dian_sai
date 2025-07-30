@@ -1,3 +1,5 @@
 opencv-python
 pyyaml
 Pillow
+matplotlib
+scikit-learn
