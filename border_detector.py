@@ -5,13 +5,15 @@ import numpy as np
 class BorderDetector:
     def detect_border(self, edges, frame):
         # 查找轮廓
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
             return False, None
         
-        # 找到最大的轮廓（假设是A4边框的内侧）
-        largest_contour = max(contours, key=cv2.contourArea)
+        # 找到最大的轮廓和其索引
+        areas = [cv2.contourArea(c) for c in contours]
+        largest_idx = np.argmax(areas)
+        largest_contour = contours[largest_idx]
         
         # 逼近轮廓为多边形
         epsilon = 0.02 * cv2.arcLength(largest_contour, True)
@@ -19,6 +21,60 @@ class BorderDetector:
         
         if len(approx) != 4:
             return False, None  # 不是四边形
+        
+        # 检查最大轮廓内部是否有子轮廓
+        has_inner_contours = False
+        if hierarchy is not None:
+            # 查找当前轮廓的第一个子轮廓
+            first_child = hierarchy[0][largest_idx][2]  # [2]是第一个子轮廓索引
+            if first_child != -1:
+                has_inner_contours = True
+        
+        if not has_inner_contours:
+            return False, None  # 内部没有轮廓，可能是A4纸上的目标
+        
+        # 检查是否为A4纸外框
+        current_contour = largest_contour
+        h, w = frame.shape[:2]
+        
+        # 计算当前轮廓的边界框
+        rect = cv2.boundingRect(current_contour)
+        rect_width, rect_height = rect[2], rect[3]
+        rect_ratio = rect_width / rect_height if rect_height > 0 else 0
+        
+        # A4纸外框比例约为 297:210 ≈ 1.41
+        A4_OUTER_RATIO = 297 / 210
+        # A4纸内框比例约为 257:170 ≈ 1.51
+        A4_INNER_RATIO = 257 / 170
+        
+        # 计算轮廓面积占图像面积的比例
+        contour_area = cv2.contourArea(current_contour)
+        frame_area = w * h
+        area_ratio = contour_area / frame_area
+        
+        # 判断是否为A4纸外框：宽高比在1.3-1.6之间，且面积占比较大
+        is_outer_frame = (1.3 <= rect_ratio <= 1.6 and area_ratio > 0.3)
+        
+        if is_outer_frame and hierarchy is not None:
+            # 尝试找到内部的第一个四边形轮廓作为真正的边框
+            first_child = hierarchy[0][largest_idx][2]
+            if first_child != -1:
+                inner_contour = contours[first_child]
+                
+                # 检查内部轮廓是否为四边形
+                inner_epsilon = 0.02 * cv2.arcLength(inner_contour, True)
+                inner_approx = cv2.approxPolyDP(inner_contour, inner_epsilon, True)
+                
+                if len(inner_approx) == 4:
+                    # 验证内部轮廓的比例是否符合A4纸内框
+                    inner_rect = cv2.boundingRect(inner_contour)
+                    inner_ratio = inner_rect[2] / inner_rect[3] if inner_rect[3] > 0 else 0
+                    
+                    # 检查内部轮廓的宽高比是否在1.3-1.6范围内
+                    if 1.3 <= inner_ratio <= 1.6:  # 稍微放宽范围
+                        # 使用内部轮廓作为真正的边框
+                        current_contour = inner_contour
+                        approx = inner_approx
         
         # 计算凸包
         hull = cv2.convexHull(approx)

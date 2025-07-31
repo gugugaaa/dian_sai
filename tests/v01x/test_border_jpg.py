@@ -7,7 +7,7 @@ import numpy as np
 from border_detector import BorderDetector
 
 detector = BorderDetector()
-img_dir = os.path.join(os.path.dirname(__file__), "../../images/fake_angle")
+img_dir = "images/fake_angle"
 img_files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
 
 for fname in img_files:

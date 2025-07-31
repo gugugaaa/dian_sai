@@ -3,3 +3,4 @@ pyyaml
 Pillow
 matplotlib
 scikit-learn
+tensorflow

@@ -94,7 +94,7 @@ def test_shape_detection():
                 continue
             
             # 基于A4边框进行后裁切，避免边框干扰形状检测
-            post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
+            post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=3)
             
             # 使用PnP计算距离D - 直接使用system.K
             D_raw, _ = system.distance_calculator.calculate_D(corners, system.K)
@@ -112,8 +112,8 @@ def test_shape_detection():
             # 直接使用PnP计算的距离，不进行映射校正
             D_corrected = D_raw
             
-            # 检测形状 - 使用后裁剪后的画面
-            shape, x_pix, shape_params = system.shape_detector.detect_shape(post_cropped_frame)
+            # 检测多个正方形 - 使用后裁剪后的画面
+            squares = system.shape_detector.detect_squares(post_cropped_frame)
             
             # 创建结果显示图像 - 使用后裁剪后的画面
             result_frame = post_cropped_frame.copy()
@@ -132,25 +132,43 @@ def test_shape_detection():
             # 绘制边框线
             cv2.polylines(border_frame, [corners.astype(int)], True, (255, 0, 0), 2)
             
-            if shape:
-                # 计算实际尺寸x（直接使用system.K和adjusted_corners）
-                x = system.shape_detector.calculate_X(x_pix, D_corrected, system.K, adjusted_corners)
+            if squares:
+                # 计算每个正方形的平均边长 x_pix
+                square_infos = []
+                for sq in squares:
+                    points = sq['params']
+                    sides = []
+                    for i in range(len(points)):
+                        p1 = points[i]
+                        p2 = points[(i + 1) % len(points)]
+                        side = np.linalg.norm(p1 - p2)
+                        sides.append(side)
+                    x_pix = np.mean(sides)
+                    square_infos.append({'x_pix': x_pix, 'params': points})
+                
+                # 找到最小的正方形（基于 x_pix）
+                min_square = min(square_infos, key=lambda s: s['x_pix'])
+                
+                # 只为最小的正方形计算尺寸并更新滤波器（假设焦点是最小的）
+                x = system.shape_detector.calculate_X(min_square['x_pix'], D_corrected, system.K, adjusted_corners)
                 
                 # 使用移动平均值滤波器
                 x_avg, D_avg = avg_filter.update(x, D_corrected)
-                x_avg_corrected = x_avg - 0  # 修正值
+                x_avg_corrected = x_avg - 0 # 修正值
 
-                print(f"检测到形状: {shape}")
-                print(f"尺寸: {D_corrected:.2f}cm")
+                print(f"检测到 {len(squares)} 个正方形")
+                print(f"最小正方形尺寸: {D_corrected:.2f}cm")
                 print(f"平均值 - 尺寸: {x_avg_corrected:.2f}cm, 距离: {D_avg:.2f}cm")
                 
-                # 绘制检测到的形状
-                result_frame = system.shape_detector.draw_shape(
-                    result_frame, shape, shape_params, color=(0, 255, 0), thickness=3
-                )
+                # 绘制所有正方形：其他用黄色，最小用绿色
+                for sq_info in square_infos:
+                    color = (0, 255, 0) if sq_info == min_square else (0, 255, 255)  # 绿色 for min, 黄色 for others
+                    result_frame = system.shape_detector.draw_shape(
+                        result_frame, 'square', sq_info['params'], color=color, thickness=3
+                    )
                 
-                # 在图像上绘制信息（显示平均值）
-                cv2.putText(result_frame, f"Size: {(x_avg_corrected):.1f}cm", (10, 30), 
+                # 在图像上绘制信息（显示平均值，只针对最小）
+                cv2.putText(result_frame, f"Size (min): {(x_avg_corrected):.1f}cm", (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                 cv2.putText(result_frame, f"Distance: {D_avg:.1f}cm", (10, 50), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
