@@ -1,7 +1,7 @@
 import sys
 import os
 # 添加根目录到路径以便导入模块
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 import cv2
 import numpy as np
@@ -58,7 +58,7 @@ def test_shape_detection():
             post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
             
             # 使用PnP计算距离D
-            D = system.distance_calculator.calculate_D(corners)
+            D, _ = system.distance_calculator.calculate_D(corners)
             if D is None:
                 print("PnP求解失败")
                 cv2.imshow("Shape Detection", post_cropped_frame)

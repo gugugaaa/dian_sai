@@ -1,7 +1,7 @@
 import sys
 import os
 # 添加根目录到路径以便导入模块
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 import cv2
 import numpy as np
@@ -116,8 +116,10 @@ def test_shape_detection():
             # 基于A4边框进行后裁切，避免边框干扰形状检测
             post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
             
-            # 使用PnP计算距离D
-            D_raw = system.distance_calculator.calculate_D(corners)
+            # 使用PnP计算距离D - 获取cropped_frame的K矩阵
+            h_cropped, w_cropped = cropped_frame.shape[:2]
+            K_cropped = system.get_adjusted_K(w_cropped, h_cropped)
+            D_raw, _ = system.distance_calculator.calculate_D(corners, K_cropped)
             if D_raw is None:
                 print("PnP求解失败")
                 cv2.imshow("Shape Detection", post_cropped_frame)
@@ -153,8 +155,11 @@ def test_shape_detection():
             cv2.polylines(border_frame, [corners.astype(int)], True, (255, 0, 0), 2)
             
             if shape:
-                # 计算实际尺寸x（使用校正后的距离）
-                x = system.shape_detector.calculate_X(x_pix, D_corrected, system.K, adjusted_corners)
+                # 计算实际尺寸x（使用校正后的距离和调整后的K矩阵）
+                # 获取后裁剪图像的尺寸并调整K矩阵
+                h, w = post_cropped_frame.shape[:2]
+                adjusted_K = system.get_adjusted_K(w, h)
+                x = system.shape_detector.calculate_X(x_pix, D_corrected, adjusted_K, adjusted_corners)
                 
                 # 使用移动平均值滤波器
                 x_avg, D_avg = avg_filter.update(x, D_corrected)

@@ -90,7 +90,29 @@ class MeasurementSystem:
         # 初始化形状检测器
         self.shape_detector = ShapeDetector()
         # 初始化距离计算器
-        self.distance_calculator = DistanceCalculator(self.K)
+        self.distance_calculator = DistanceCalculator()
+
+    def get_adjusted_K(self, image_width, image_height, original_width=500, original_height=700):
+        """
+        根据图像尺寸动态调整相机内参K矩阵
+
+        Args:
+            image_width: 当前图像宽度
+            image_height: 当前图像高度
+            original_width: 原始标定时的图像宽度 (默认500)
+            original_height: 原始标定时的图像高度 (默认700)
+
+        Returns:
+            adjusted_K: 调整后的K矩阵
+        """
+        adjusted_K = self.K.copy()
+        width_scale = image_width / original_width
+        height_scale = image_height / original_height
+        adjusted_K[0, 0] *= width_scale   # fx
+        adjusted_K[1, 1] *= height_scale  # fy
+        adjusted_K[0, 2] *= width_scale   # cx
+        adjusted_K[1, 2] *= height_scale  # cy
+        return adjusted_K
 
     def button_pressed(self):
         if self.button_var.get():
@@ -121,6 +143,10 @@ class MeasurementSystem:
                     self.log_error("预裁剪失败，无法检测闭合轮廓")
                     return
                 
+                # 获取裁剪后图像的K矩阵
+                h, w = cropped_frame.shape[:2]
+                adjusted_K = self.get_adjusted_K(w, h)
+                
                 # 预处理（去畸变和边缘检测，使用裁剪后的帧）
                 edges = self.preprocessor.preprocess(cropped_frame)
                 
@@ -134,8 +160,9 @@ class MeasurementSystem:
                 # 基于A4边框进行后裁切，避免边框干扰形状检测
                 post_cropped_frame, adjusted_corners = self.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
                 
-                # 使用PnP计算距离D（使用原始角点）
-                D = self.distance_calculator.calculate_D(corners)
+                # 使用PnP计算距离D（使用调整后的K矩阵）
+                distance_calc = DistanceCalculator(adjusted_K)
+                D = distance_calc.calculate_D(corners)
                 if D is None:
                     self.log_error("PnP求解失败")
                     return
@@ -146,8 +173,8 @@ class MeasurementSystem:
                     self.log_error("无法检测形状")
                     return
                 
-                # 计算实际尺寸x，传入调整后的A4纸角点信息
-                x = self.shape_detector.calculate_X(x_pix, D, self.K, adjusted_corners)
+                # 计算实际尺寸x，传入调整后的A4纸角点信息和调整后的K矩阵
+                x = self.shape_detector.calculate_X(x_pix, D, adjusted_K, adjusted_corners)
                 
                 self.show_result(D, x)
                 self.save_log(D, x, t0)

@@ -3,8 +3,7 @@ import cv2
 import numpy as np
 
 class DistanceCalculator:
-    def __init__(self, K):
-        self.K = K
+    def __init__(self):
         # 内边框识别：A4外边框每边减去2cm
         self.real_width = 17.0  # cm (21.0 - 2*2)
         self.real_height = 25.7  # cm (29.7 - 2*2)
@@ -18,12 +17,10 @@ class DistanceCalculator:
             [-half_w, -half_h, 0]
         ], dtype=np.float32)
 
-    def calculate_D(self, image_points):
-        # 使用solvePnP计算旋转和平移向量
-        success, rvec, tvec = cv2.solvePnP(self.object_points, image_points, self.K, None)
+    def calculate_D(self, image_points, K):
+        success, rvec, tvec = cv2.solvePnP(self.object_points, image_points, K, None)
         if not success:
-            return None
-        
-        # 距离D是tvec的Z分量（相机到平面的距离）
+            return None, None, None
         D = tvec[2][0]  # cm
-        return D
+        theta_deg = np.linalg.norm(rvec) * (180 / np.pi)  # 粗略夹角
+        return D, theta_deg

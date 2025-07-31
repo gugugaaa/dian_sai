@@ -1,7 +1,7 @@
 import sys
 import os
 # 添加根目录到路径以便导入模块
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 import cv2
 import numpy as np
