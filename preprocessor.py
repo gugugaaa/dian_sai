@@ -1,11 +1,29 @@
 # preprocessor.py
 import cv2
 import numpy as np
+from collections import deque
 
 class Preprocessor:
-    def __init__(self, K, dist):
+    def __init__(self, K, dist, update_interval=20, history_size=50):
+        """
+        初始化预处理器
+        
+        Args:
+            K: 相机内参矩阵
+            dist: 畸变系数
+            update_interval: 裁切区域更新间隔（帧数），默认5帧更新一次
+            history_size: 历史区域缓存大小，用于计算平均值，默认10个
+        """
         self.K = K
         self.dist = dist
+        self.update_interval = update_interval
+        self.history_size = history_size
+        
+        # 防抖动相关参数
+        self.frame_count = 0
+        self.current_crop_region = None  # 当前使用的裁切区域 (x, y, w, h)
+        self.region_history = deque(maxlen=history_size)  # 历史检测区域队列
+        self.is_region_valid = False    # 当前区域是否有效
 
     def _calculate_rectangularity(self, contour):
         """
@@ -80,7 +98,26 @@ class Preprocessor:
             
         return best_contour, True
 
-    def pre_crop(self, frame):
+    def _should_update_region(self):
+        """
+        判断是否应该更新裁切区域
+        
+        Returns:
+            bool: 是否需要更新区域
+        """
+        self.frame_count += 1
+        return (self.frame_count % self.update_interval == 0) or (not self.is_region_valid)
+
+    def _detect_crop_region(self, frame):
+        """
+        检测新的裁切区域
+        
+        Args:
+            frame: 输入帧
+            
+        Returns:
+            tuple: (裁切区域(x,y,w,h), 是否检测成功)
+        """
         # 转换为灰度图
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # 应用高斯模糊降噪
@@ -99,13 +136,131 @@ class Preprocessor:
         
         # 获取边界框
         x, y, w, h = cv2.boundingRect(largest_contour)
+        return (x, y, w, h), True
+
+    def _is_region_reasonable(self, new_region):
+        """
+        判断新检测的区域是否合理（与历史平均值差距不会太大）
+        
+        Args:
+            new_region: 新检测的区域 (x, y, w, h)
+            
+        Returns:
+            bool: 区域是否合理
+        """
+        if not self.region_history:
+            return True  # 如果没有历史数据，接受任何合理区域
+        
+        # 计算当前平均区域
+        avg_region = self._calculate_average_region()
+        if avg_region is None:
+            return True
+        
+        # 计算新区域与平均区域的差异
+        x_diff = abs(new_region[0] - avg_region[0])
+        y_diff = abs(new_region[1] - avg_region[1])
+        w_diff = abs(new_region[2] - avg_region[2])
+        h_diff = abs(new_region[3] - avg_region[3])
+        
+        # 设置合理的阈值（可以根据实际情况调整）
+        max_position_diff = 50  # 位置差异阈值
+        max_size_diff = 100     # 尺寸差异阈值
+        
+        return (x_diff <= max_position_diff and 
+                y_diff <= max_position_diff and 
+                w_diff <= max_size_diff and 
+                h_diff <= max_size_diff)
+
+    def _calculate_average_region(self):
+        """
+        计算历史区域的平均值
+        
+        Returns:
+            tuple: 平均区域 (x, y, w, h) 或 None
+        """
+        if not self.region_history:
+            return None
+        
+        # 计算各维度的平均值
+        regions_array = np.array(list(self.region_history))
+        avg_region = np.mean(regions_array, axis=0).astype(int)
+        
+        return tuple(avg_region)
+
+    def _update_region_history(self, new_region):
+        """
+        更新区域历史记录
+        
+        Args:
+            new_region: 新的区域 (x, y, w, h)
+        """
+        # 只有当新区域合理时才添加到历史记录
+        if self._is_region_reasonable(new_region):
+            self.region_history.append(new_region)
+            return True
+        return False
+
+    def pre_crop(self, frame):
+        """
+        预裁剪图像，带防抖动功能（使用平均值更新）
+        
+        Args:
+            frame: 输入帧
+            
+        Returns:
+            tuple: (裁剪后的图像, 是否成功)
+        """
+        # 检查是否需要更新裁切区域
+        if self._should_update_region():
+            new_region, detection_success = self._detect_crop_region(frame)
+            
+            if detection_success:
+                # 尝试更新历史记录
+                if self._update_region_history(new_region):
+                    # 计算新的平均区域
+                    avg_region = self._calculate_average_region()
+                    if avg_region is not None:
+                        self.current_crop_region = avg_region
+                        self.is_region_valid = True
+                elif not self.is_region_valid:
+                    # 如果没有有效区域且新区域不合理，直接使用新区域
+                    self.region_history.append(new_region)
+                    self.current_crop_region = new_region
+                    self.is_region_valid = True
+            elif not self.is_region_valid:
+                # 如果检测失败且没有有效的区域，返回失败
+                return None, False
+        
+        # 使用当前区域进行裁切
+        if not self.is_region_valid or self.current_crop_region is None:
+            return None, False
+        
+        x, y, w, h = self.current_crop_region
+        
         # 裁剪图像，添加一些边距以确保完整
         margin = 20
-        cropped = frame[max(0, y - margin):y + h + margin, max(0, x - margin):x + w + margin]
+        frame_height, frame_width = frame.shape[:2]
+        
+        # 确保裁切区域在图像范围内
+        x_start = max(0, x - margin)
+        y_start = max(0, y - margin)
+        x_end = min(frame_width, x + w + margin)
+        y_end = min(frame_height, y + h + margin)
+        
+        cropped = frame[y_start:y_end, x_start:x_end]
         
         return cropped, True
 
     def preprocess(self, frame):
+        """
+        预处理图像
+        
+        Args:
+            frame: 输入帧
+            
+        Returns:
+            处理后的边缘图像
+        """
         # 去畸变
         undistorted = cv2.undistort(frame, self.K, self.dist)
         # 转换为灰度图
@@ -115,3 +270,26 @@ class Preprocessor:
         # 边缘检测使用Canny
         edges = cv2.Canny(blurred, 50, 150)
         return edges
+
+    def reset_region_cache(self):
+        """
+        重置区域缓存，强制在下一帧重新检测
+        """
+        self.current_crop_region = None
+        self.is_region_valid = False
+        self.frame_count = 0
+        self.region_history.clear()
+
+    def get_region_stats(self):
+        """
+        获取区域统计信息（用于调试）
+        
+        Returns:
+            dict: 包含当前区域、历史数量等信息
+        """
+        return {
+            'current_region': self.current_crop_region,
+            'history_count': len(self.region_history),
+            'is_valid': self.is_region_valid,
+            'frame_count': self.frame_count
+        }

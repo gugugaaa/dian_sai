@@ -3,7 +3,51 @@ import cv2
 import numpy as np
 
 class BorderDetector:
+    def __init__(self, update_interval=20):
+        """
+        初始化边框检测器
+        
+        Args:
+            update_interval: 角点更新间隔帧数，每N帧重新检测一次角点
+        """
+        self.update_interval = update_interval
+        self.frame_counter = 0
+        self.stable_corners = None  # 当前稳定的角点
+        self.need_detection = True  # 是否需要重新检测
+        
     def detect_border(self, edges, frame):
+        """
+        检测边框，每update_interval帧才重新检测一次
+        """
+        self.frame_counter += 1
+        
+        # 如果还没到更新时间且有稳定角点，直接返回
+        if not self.need_detection and self.stable_corners is not None:
+            if self.frame_counter % self.update_interval != 0:
+                return True, self.stable_corners
+        
+        # 需要重新检测角点
+        success, new_corners = self._detect_border_internal(edges, frame)
+        
+        if success and new_corners is not None:
+            # 更新稳定角点
+            self.stable_corners = new_corners.copy()
+            self.need_detection = False
+            print(f"Frame {self.frame_counter}: Updated corners")
+            return True, self.stable_corners
+        else:
+            # 检测失败，继续使用之前的稳定角点
+            if self.stable_corners is not None:
+                print(f"Frame {self.frame_counter}: Detection failed, using stable corners")
+                return True, self.stable_corners
+            else:
+                print(f"Frame {self.frame_counter}: No stable corners available")
+                return False, None
+    
+    def _detect_border_internal(self, edges, frame):
+        """
+        内部边框检测逻辑（原来的detect_border逻辑）
+        """
         # 查找轮廓
         contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -103,6 +147,24 @@ class BorderDetector:
             return False, None
         
         return True, sorted_corners
+    
+    def force_update(self):
+        """强制在下一帧重新检测角点"""
+        self.need_detection = True
+        
+    def reset(self):
+        """重置检测器状态"""
+        self.frame_counter = 0
+        self.stable_corners = None
+        self.need_detection = True
+        
+    def set_update_interval(self, interval):
+        """动态调整更新间隔"""
+        self.update_interval = interval
+        
+    def get_current_corners(self):
+        """获取当前稳定的角点"""
+        return self.stable_corners
     
     def post_crop(self, frame, corners, inset_pixels=5):
         """
