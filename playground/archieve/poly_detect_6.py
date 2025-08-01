@@ -1,7 +1,13 @@
+import sys
+import os
+# 添加根目录到路径以便导入模块
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
+
 import cv2
 import numpy as np
 import math
 from itertools import combinations
+from system_initializer import MeasurementSystem
 
 
 class IntegratedPolygonSquareDetector:
@@ -15,7 +21,7 @@ class IntegratedPolygonSquareDetector:
                  canny_high_threshold=150,
                  min_perimeter=50,
                  outer_epsilon_factor=0.005,
-                 inner_epsilon_factor=0.02,
+                 inner_epsilon_factor=0.005,
                  outer_vertex_merge_threshold=8.0,
                  inner_vertex_merge_threshold=6.0,
                  similarity_perimeter_threshold=0.1,
@@ -314,8 +320,6 @@ class IntegratedPolygonSquareDetector:
         
         return None
 
-    # ============ 正方形构造相关方法 ============
-    
     def create_squares_from_segment(self, p1, p2):
         """
         根据线段端点创建三个正方形
@@ -420,15 +424,75 @@ class IntegratedPolygonSquareDetector:
         dy = p2[1] - p1[1]
         return math.sqrt(dx*dx + dy*dy)
     
-    def get_all_vertices(self):
-        """获取所有外轮廓的顶点"""
-        all_vertices = []
-        for poly in self.outer_polygons:
-            vertices = poly['approx']
-            for vertex in vertices:
-                coord = tuple(vertex[0])
-                all_vertices.append(coord)
-        return all_vertices
+    def is_convex_vertex(self, contour_type, contour_id, vertex_id, step_distance=10.0):
+        """
+        检测指定顶点是否是凸点
+        
+        Args:
+            contour_type: 'outer' 或 'inner'
+            contour_id: 轮廓序号
+            vertex_id: 顶点序号
+            step_distance: 沿内角平分线走的步数，默认10像素
+        
+        Returns:
+            bool: True if convex, False otherwise
+        """
+        try:
+            if contour_type == 'outer':
+                if contour_id >= len(self.outer_polygons):
+                    return False
+                vertices = self.outer_polygons[contour_id]['approx']
+            elif contour_type == 'inner':
+                if contour_id >= len(self.inner_polygons):
+                    return False
+                vertices = self.inner_polygons[contour_id]['approx']
+            else:
+                return False
+            
+            n_vertices = len(vertices)
+            if n_vertices < 3 or vertex_id >= n_vertices:
+                return False
+            
+            prev_idx = (vertex_id - 1) % n_vertices
+            curr_idx = vertex_id
+            next_idx = (vertex_id + 1) % n_vertices
+            
+            prev_point = vertices[prev_idx][0].astype(float)
+            curr_point = vertices[curr_idx][0].astype(float)
+            next_point = vertices[next_idx][0].astype(float)
+            
+            # 计算两条边的向量
+            vector1 = prev_point - curr_point  # 从当前点指向前一个点
+            vector2 = next_point - curr_point  # 从当前点指向下一个点
+            
+            # 归一化向量
+            len1 = np.linalg.norm(vector1)
+            len2 = np.linalg.norm(vector2)
+            
+            if len1 == 0 or len2 == 0:
+                return False
+            
+            vector1_norm = vector1 / len1
+            vector2_norm = vector2 / len2
+            
+            # 计算内角平分线方向（两个归一化向量的和）
+            bisector = vector1_norm + vector2_norm
+            bisector_len = np.linalg.norm(bisector)
+            
+            if bisector_len == 0:
+                # 如果两个向量相反（180度角），则不是凸点
+                return False
+            
+            bisector_norm = bisector / bisector_len
+            
+            # 沿内角平分线方向走step_distance步
+            test_point = curr_point + bisector_norm * step_distance
+            
+            # 检查这个点是否在外边框内
+            return self._point_in_valid_area_with_tolerance(tuple(test_point), tolerance=3.0)
+            
+        except Exception:
+            return False
     
     def get_vertex_angle(self, contour_type, contour_id, vertex_id):
         """
@@ -487,12 +551,12 @@ class IntegratedPolygonSquareDetector:
         except Exception:
             return None
     
-    def get_90_degree_vertices(self, angle_tolerance=10.0):
+    def get_90_degree_vertices(self, angle_tolerance=15):
         """
-        获取外轮廓中所有接近90度角的顶点
+        获取外轮廓中所有接近90度角的凸顶点
         
         Args:
-            angle_tolerance: 角度容忍度（度数），默认10度
+            angle_tolerance: 角度容忍度（度数），默认15度
             
         Returns:
             list: 有效顶点列表
@@ -504,6 +568,11 @@ class IntegratedPolygonSquareDetector:
             n_vertices = len(vertices)
             
             for vertex_id in range(n_vertices):
+                # 首先检查是否是凸点
+                if not self.is_convex_vertex('outer', contour_id, vertex_id):
+                    continue
+                
+                # 然后检查角度
                 angle = self.get_vertex_angle('outer', contour_id, vertex_id)
                 
                 if angle is not None:
@@ -515,7 +584,8 @@ class IntegratedPolygonSquareDetector:
                             'contour_id': contour_id,
                             'vertex_id': vertex_id,
                             'angle': angle,
-                            'coordinates': coordinates
+                            'coordinates': coordinates,
+                            'is_convex': True  # 标记为凸点
                         })
         
         return valid_vertices
@@ -523,45 +593,28 @@ class IntegratedPolygonSquareDetector:
     def find_minimum_square_points(self):
         """
         找到构造正方形边长最小的两个点
-        使用筛选后的90度角顶点进行组合：
-        1. 获取所有90度角顶点
-        2. 找到满足is_line_inside_shape的所有两点组合
-        3. 用square_in_polygon确认是否有在外轮廓内部的构造正方形
-        4. 如果有，求出边长
-        5. 找到边长最小的那两个点
         """
-        print("开始查找构造正方形边长最小的两个点...")
-        
-        # 步骤1：获取所有90度角顶点
-        valid_vertices = self.get_90_degree_vertices(angle_tolerance=10.0)
-        print(f"总共找到 {len(valid_vertices)} 个90度角顶点")
+        # 获取所有90度角凸顶点
+        valid_vertices = self.get_90_degree_vertices(angle_tolerance=20)
         
         if len(valid_vertices) < 2:
-            print("90度角顶点数量不足，无法构造正方形")
             return None, None, float('inf'), []
         
         # 提取坐标用于组合
         vertex_coordinates = [vertex['coordinates'] for vertex in valid_vertices]
         
-        # 步骤2：遍历所有两点组合
+        # 遍历所有两点组合
         valid_combinations = []
-        total_combinations = len(list(combinations(vertex_coordinates, 2)))
-        print(f"需要检查 {total_combinations} 个90度角顶点组合")
         
-        processed = 0
         for p1, p2 in combinations(vertex_coordinates, 2):
-            processed += 1
-            if processed % 10 == 0:
-                print(f"已处理 {processed}/{total_combinations} 个组合...")
-            
-            # 步骤3：检查连线是否在图形内部
+            # 检查连线是否在图形内部
             if not self.is_line_inside_shape(p1, p2):
                 continue
             
-            # 步骤4：构造三个正方形
+            # 构造三个正方形
             squares = self.create_squares_from_segment(p1, p2)
             
-            # 步骤5：检查是否有正方形在外轮廓内部
+            # 检查是否有正方形在外轮廓内部
             has_valid_square = False
             square_results = []
             
@@ -578,7 +631,7 @@ class IntegratedPolygonSquareDetector:
                     if is_inside:
                         has_valid_square = True
             
-            # 步骤6：如果有有效正方形，计算边长
+            # 如果有有效正方形，计算边长
             if has_valid_square:
                 side_length = self.calculate_square_side_length(p1, p2)
                 valid_combinations.append({
@@ -589,121 +642,168 @@ class IntegratedPolygonSquareDetector:
                     'square_results': square_results
                 })
         
-        print(f"找到 {len(valid_combinations)} 个有效的90度角顶点组合")
-        
         if not valid_combinations:
-            print("没有找到任何有效的90度角顶点组合")
             return None, None, float('inf'), []
         
-        # 步骤7：找到边长最小的组合
+        # 找到边长最小的组合
         min_combination = min(valid_combinations, key=lambda x: x['side_length'])
-        
-        print(f"最小边长: {min_combination['side_length']:.2f}")
-        print(f"最优两点: {min_combination['point1']} -> {min_combination['point2']}")
         
         return (min_combination['point1'], 
                 min_combination['point2'], 
                 min_combination['side_length'], 
                 valid_combinations)
     
-    def visualize_result(self, image, best_p1, best_p2, side_length, all_combinations):
-        """可视化结果"""
-        if best_p1 is None or best_p2 is None:
-            print("没有有效结果需要可视化")
-            return image
-        
-        result_image = image.copy()
-        
-        # 绘制所有外轮廓
-        for poly in self.outer_polygons:
-            cv2.polylines(result_image, [poly['approx']], True, (0, 255, 0), 2)
-        
-        # 绘制所有内轮廓
-        for poly in self.inner_polygons:
-            cv2.polylines(result_image, [poly['approx']], True, (0, 0, 255), 2)
-        
-        # 绘制最优线段
-        cv2.line(result_image, 
-                (int(best_p1[0]), int(best_p1[1])), 
-                (int(best_p2[0]), int(best_p2[1])), 
-                (255, 0, 255), 3)  # 紫色粗线
-        
-        # 绘制最优线段的端点
-        cv2.circle(result_image, (int(best_p1[0]), int(best_p1[1])), 8, (255, 0, 255), -1)
-        cv2.circle(result_image, (int(best_p2[0]), int(best_p2[1])), 8, (255, 0, 255), -1)
-        
-        # 构造并绘制最优正方形
-        squares = self.create_squares_from_segment(best_p1, best_p2)
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # 红、绿、蓝
-        
-        for i, square in enumerate(squares):
-            # 检查这个正方形是否在外轮廓内部
-            for poly in self.outer_polygons:
-                is_inside, _ = self.square_in_polygon(square, poly['approx'], tolerance=5.0)
-                if is_inside:
-                    # 绘制在内部的正方形
-                    points = np.array([(int(x), int(y)) for x, y in square], np.int32)
-                    cv2.polylines(result_image, [points], True, colors[i], 2)
-                    break
-        
-        # 添加文字信息
-        cv2.putText(result_image, f"Min Side Length: {side_length:.2f}", 
-                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-        cv2.putText(result_image, f"Valid Combinations: {len(all_combinations)}", 
-                   (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
-        cv2.putText(result_image, f"Best Points: ({int(best_p1[0])},{int(best_p1[1])}) - ({int(best_p2[0])},{int(best_p2[1])})", 
-                   (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-        
-        return result_image
-
-
-def main():
-    """主函数"""
-    # 创建检测器
-    detector = IntegratedPolygonSquareDetector()
+def test_integrated_poly_detection():
+    """测试集成的多边形检测和测量功能"""
+    print("初始化测量系统...")
     
-    # 读取图像
-    image_path = 'images/overlap/image3.png'
     try:
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"无法读取图像: {image_path}")
-            return
-        
-        print(f"成功读取图像: {image.shape}")
-        
-        # 检测多边形
-        print("正在检测多边形...")
-        outer_polygons, inner_polygons = detector.detect_polygons(image)
-        print(f"检测到 {len(outer_polygons)} 个外轮廓，{len(inner_polygons)} 个内轮廓")
-        
-        # 查找最小边长的两点组合
-        best_p1, best_p2, min_side_length, all_combinations = detector.find_minimum_square_points()
-        
-        # 可视化结果
-        result_image = detector.visualize_result(image, best_p1, best_p2, min_side_length, all_combinations)
-        
-        # 显示结果
-        cv2.imshow('Original Image', image)
-        cv2.imshow('Result', result_image)
-        
-        print("\n=== 最终结果 ===")
-        if best_p1 is not None:
-            print(f"最优两点: {best_p1} -> {best_p2}")
-            print(f"最小边长: {min_side_length:.2f}")
-            print(f"总共找到 {len(all_combinations)} 个有效组合")
-        else:
-            print("未找到满足条件的两点组合")
-        
-        print("\n按任意键退出...")
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-        
+        system = MeasurementSystem("calib.yaml", 500)
+        print("系统初始化成功")
     except Exception as e:
-        print(f"处理过程中发生错误: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"系统初始化失败: {e}")
+        return
+    
+    # 初始化多边形检测器
+    poly_detector = IntegratedPolygonSquareDetector()
+    
+    print("开始集成多边形检测测试...")
+    print("按 'q' 退出")
+    
+    while True:
+        try:
+            # 捕获帧
+            frame = system.capture_frame()
+            
+            # 显示原始摄像头画面
+            cv2.imshow("Camera Feed - Original", frame)
+            
+            # 预裁剪
+            cropped_frame, ok = system.preprocessor.pre_crop(frame)
+            if not ok:
+                print("预裁剪失败，无法检测闭合轮廓")
+                cv2.imshow("Polygon Detection", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                continue
+            
+            # 预处理（去畸变和边缘检测，使用裁剪后的帧）
+            edges = system.preprocessor.preprocess(cropped_frame)
+            
+            # 检测A4纸边框并获取角点
+            ok, corners = system.border_detector.detect_border(edges, cropped_frame)
+            if not ok:
+                print("无法检测A4边框")
+                cv2.imshow("Polygon Detection", cropped_frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                continue
+            
+            # 基于A4边框进行后裁切
+            post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
+            
+            # 使用PnP计算距离D
+            D, _ = system.distance_calculator.calculate_D(corners, system.K)
+            if D is None:
+                print("PnP求解失败")
+                cv2.imshow("Polygon Detection", post_cropped_frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                continue
+            
+            # 使用多边形检测器检测多边形
+            outer_polygons, inner_polygons = poly_detector.detect_polygons(post_cropped_frame)
+            
+            # 创建结果显示图像
+            result_frame = post_cropped_frame.copy()
+            
+            # 绘制检测到的多边形
+            for poly in outer_polygons:
+                cv2.polylines(result_frame, [poly['approx']], True, (0, 255, 0), 2)
+            
+            for poly in inner_polygons:
+                cv2.polylines(result_frame, [poly['approx']], True, (0, 0, 255), 2)
+            
+            # 获取凸90度角顶点并绘制标记
+            convex_90_vertices = poly_detector.get_90_degree_vertices(angle_tolerance=20)
+            for vertex in convex_90_vertices:
+                coord = vertex['coordinates']
+                angle = vertex['angle']
+                # 绘制凸90度角顶点为橙色圆点
+                cv2.circle(result_frame, (int(coord[0]), int(coord[1])), 6, (0, 165, 255), -1)
+                # 显示角度信息
+                cv2.putText(result_frame, f"{angle:.1f}", 
+                           (int(coord[0])+10, int(coord[1])-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
+            
+            # 查找最小边长的两点组合
+            best_p1, best_p2, min_side_length_pix, all_combinations = poly_detector.find_minimum_square_points()
+            
+            if best_p1 is not None and best_p2 is not None:
+                # 计算实际尺寸 - 使用类似shape_detector的方法
+                # 这里我们使用像素边长来计算实际尺寸
+                real_size = system.shape_detector.calculate_X(min_side_length_pix, D, system.K, adjusted_corners)
+                
+                print(f"检测到最小正方形: 像素边长: {min_side_length_pix:.2f}, 距离D: {D:.2f}cm, 实际边长: {real_size:.2f}cm")
+                
+                # 绘制最优线段
+                cv2.line(result_frame, 
+                        (int(best_p1[0]), int(best_p1[1])), 
+                        (int(best_p2[0]), int(best_p2[1])), 
+                        (255, 0, 255), 3)  # 紫色粗线
+                
+                # 绘制最优线段的端点
+                cv2.circle(result_frame, (int(best_p1[0]), int(best_p1[1])), 8, (255, 0, 255), -1)
+                cv2.circle(result_frame, (int(best_p2[0]), int(best_p2[1])), 8, (255, 0, 255), -1)
+                
+                # 构造并绘制最优正方形
+                squares = poly_detector.create_squares_from_segment(best_p1, best_p2)
+                colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # 红、绿、蓝
+                
+                for i, square in enumerate(squares):
+                    # 检查这个正方形是否在外轮廓内部
+                    for poly in outer_polygons:
+                        is_inside, _ = poly_detector.square_in_polygon(square, poly['approx'], tolerance=5.0)
+                        if is_inside:
+                            # 绘制在内部的正方形
+                            points = np.array([(int(x), int(y)) for x, y in square], np.int32)
+                            cv2.polylines(result_frame, [points], True, colors[i], 2)
+                            break
+                
+                # 在图像上绘制测量信息
+                cv2.putText(result_frame, f"{real_size:.2f}cm", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+                cv2.putText(result_frame, f"{D:.2f}cm", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 1)
+            else:
+                print("未检测到有效的凸90度角顶点或正方形")
+                cv2.putText(result_frame, "No valid convex 90° vertices detected", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                cv2.putText(result_frame, f"Convex 90° Vertices: {len(convex_90_vertices)}", (10, 60), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 1)
+            
+            # 显示结果
+            cv2.imshow("Polygon Detection", result_frame)
+            
+            # 键盘控制
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+                
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"测试过程中发生错误: {e}")
+            continue
+    
+    # 清理资源
+    cv2.destroyAllWindows()
+    system.cap.release()
+    print("测试结束")
 
 
 if __name__ == "__main__":
-    main()
+    test_integrated_poly_detection()

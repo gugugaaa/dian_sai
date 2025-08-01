@@ -44,11 +44,25 @@ class IntegratedPolygonSquareDetector:
         self.inner_polygons = []
         self.image_shape = None
         
-        # 添加调试图像保存路径
-        self.debug_dir = "debug_images"
-        if not os.path.exists(self.debug_dir):
-            os.makedirs(self.debug_dir)
+        # 添加调试图像保存路径 - 为不同阶段创建不同文件夹
+        self.debug_base_dir = "debug_images"
+        self.debug_dirs = {
+            'detected_vertices': os.path.join(self.debug_base_dir, 'stage0_detected_vertices'),
+            'non_convex_vertices': os.path.join(self.debug_base_dir, 'stage1_non_convex_vertices'),
+            'non_90_degree_vertices': os.path.join(self.debug_base_dir, 'stage2_non_90_degree_vertices'),
+            'accepted_vertices': os.path.join(self.debug_base_dir, 'stage2_accepted_vertices'),  # 新增
+            'line_outside_shape': os.path.join(self.debug_base_dir, 'stage3_line_outside_shape'),
+            'squares_outside_polygon': os.path.join(self.debug_base_dir, 'stage4_squares_outside_polygon'),
+            'accepted_combinations': os.path.join(self.debug_base_dir, 'stage5_accepted_combinations')
+        }
+        
+        # 创建所有调试文件夹
+        for debug_dir in self.debug_dirs.values():
+            if not os.path.exists(debug_dir):
+                os.makedirs(debug_dir)
+        
         self.debug_frame = None  # 保存当前帧用于调试
+        self.debug_counters = {key: 0 for key in self.debug_dirs.keys()}  # 为每个阶段单独计数
     
     def preprocess_image(self, frame):
         """图像预处理：灰度化 -> 高斯模糊 -> OTSU阈值 -> Canny边缘检测"""
@@ -62,45 +76,7 @@ class IntegratedPolygonSquareDetector:
         """查找轮廓并获取层次结构信息"""
         contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         return contours, hierarchy
-    
-    def merge_close_vertices(self, vertices, distance_threshold=5.0):
-        """合并位置差异太小的顶点"""
-        if len(vertices) <= 2:
-            return vertices
-        
-        points = np.array([vertex[0] for vertex in vertices], dtype=np.float32)
-        n_points = len(points)
-        merged = np.zeros(n_points, dtype=bool)
-        merged_points = []
-        
-        for i in range(n_points):
-            if merged[i]:
-                continue
-                
-            current_point = points[i]
-            close_indices = [i]
-            
-            for j in range(i + 1, n_points):
-                if merged[j]:
-                    continue
-                    
-                distance = np.linalg.norm(points[j] - current_point)
-                if distance < distance_threshold:
-                    close_indices.append(j)
-            
-            if len(close_indices) > 1:
-                close_points = points[close_indices]
-                merged_point = np.mean(close_points, axis=0)
-                merged_points.append(merged_point)
-                for idx in close_indices:
-                    merged[idx] = True
-            else:
-                merged_points.append(current_point)
-                merged[i] = True
-        
-        result = np.array([[[int(point[0]), int(point[1])]] for point in merged_points])
-        return result
-    
+
     def is_similar_contour(self, poly1, poly2):
         """判断两个轮廓是否相似（可能是同一形状的内外边缘）"""
         perimeter_ratio = abs(poly1['perimeter'] - poly2['perimeter']) / max(poly1['perimeter'], poly2['perimeter'])
@@ -108,7 +84,7 @@ class IntegratedPolygonSquareDetector:
         return perimeter_ratio < self.similarity_perimeter_threshold and vertex_diff <= self.similarity_vertex_threshold
     
     def process_contours(self, contours, hierarchy):
-        """处理轮廓：分类、拟合、过滤重复轮廓"""
+        """处理轮廓：分类、拟合、过滤重复轮廓、合并邻近顶点"""
         all_polygons = []
         outer_polygons = []
         inner_polygons = []
@@ -126,12 +102,22 @@ class IntegratedPolygonSquareDetector:
                 
                 epsilon = self.outer_epsilon_factor * perimeter if is_outer else self.inner_epsilon_factor * perimeter
                 approx = cv2.approxPolyDP(contour, epsilon, True)
-                area = cv2.contourArea(contour)
+                
+                # +++ START: 添加顶点合并逻辑 +++
+                # 根据是内/外轮廓，选择不同的合并阈值
+                merge_threshold = self.outer_vertex_merge_threshold if is_outer else self.inner_vertex_merge_threshold
+                
+                # 对当前多边形的顶点进行合并
+                merged_approx = self.merge_polygon_vertices(approx, distance_threshold=merge_threshold)
+                # +++ END: 添加顶点合并逻辑 +++
+
+                # 使用合并后的顶点重新计算面积，虽然不必须，但更准确
+                area = cv2.contourArea(merged_approx)
                 
                 polygon_info = {
                     'contour': contour,
-                    'approx': approx,
-                    'vertices': len(approx),
+                    'approx': merged_approx,  # <-- 使用合并后的顶点
+                    'vertices': len(merged_approx), # <-- 使用合并后的顶点数量
                     'perimeter': perimeter,
                     'area': area,
                     'id': i,
@@ -142,6 +128,7 @@ class IntegratedPolygonSquareDetector:
                 
                 all_polygons.append(polygon_info)
             
+            # 后续逻辑不变
             for poly in all_polygons:
                 if poly['is_outer']:
                     outer_polygons.append(poly)
@@ -161,20 +148,109 @@ class IntegratedPolygonSquareDetector:
         
         return all_polygons, outer_polygons, inner_polygons
     
-    def merge_polygon_vertices(self, outer_polygons, inner_polygons):
-        """对所有多边形进行顶点合并处理"""
-        for poly in outer_polygons:
-            original_vertices = poly['approx']
-            merged_vertices = self.merge_close_vertices(original_vertices, self.outer_vertex_merge_threshold)
-            poly['approx'] = merged_vertices
-            poly['vertices'] = len(merged_vertices)
-        
-        for poly in inner_polygons:
-            original_vertices = poly['approx']
-            merged_vertices = self.merge_close_vertices(original_vertices, self.inner_vertex_merge_threshold)
-            poly['approx'] = merged_vertices
-            poly['vertices'] = len(merged_vertices)
     
+    def merge_polygon_vertices(self, vertices, distance_threshold=5.0):
+        """
+        合并位置差异太小的顶点，保持原有轮廓的顺序
+        """
+        if len(vertices) <= 2:
+            return vertices
+        
+        # 提取顶点坐标，保持原有顺序
+        points = np.array([vertex[0] for vertex in vertices], dtype=np.float32)
+        n_points = len(points)
+        
+        if n_points == 0:
+            return vertices
+        
+        # 用于标记哪些顶点需要被合并
+        to_merge = []
+        merged_indices = set()
+        
+        # 检查相邻顶点之间的距离（考虑轮廓的循环性质）
+        i = 0
+        while i < n_points:
+            if i in merged_indices:
+                i += 1
+                continue
+                
+            current_point = points[i]
+            merge_group = [i]  # 当前合并组，包含当前顶点索引
+            
+            # 向前查找相邻的近距离顶点
+            j = (i + 1) % n_points
+            consecutive_count = 0  # 连续近距离顶点的计数
+            
+            while j != i and consecutive_count < n_points - 1:
+                if j in merged_indices:
+                    j = (j + 1) % n_points
+                    consecutive_count += 1
+                    continue
+                    
+                distance = np.linalg.norm(points[j] - current_point)
+                if distance < distance_threshold:
+                    merge_group.append(j)
+                    merged_indices.add(j)
+                    j = (j + 1) % n_points
+                    consecutive_count += 1
+                else:
+                    break
+            
+            # 向后查找相邻的近距离顶点（仅在闭合轮廓的情况下）
+            if len(merge_group) > 1:  # 如果已经找到了需要合并的顶点
+                j = (i - 1) % n_points
+                consecutive_count = 0
+                
+                while j != i and consecutive_count < n_points - 1 and j not in merged_indices:
+                    distance = np.linalg.norm(points[j] - current_point)
+                    if distance < distance_threshold:
+                        merge_group.insert(0, j)  # 插入到前面保持顺序
+                        merged_indices.add(j)
+                        j = (j - 1) % n_points
+                        consecutive_count += 1
+                    else:
+                        break
+            
+            to_merge.append(merge_group)
+            merged_indices.add(i)
+            i += 1
+        
+        # 构建合并后的顶点列表，保持原有顺序
+        merged_vertices = []
+        processed_indices = set()
+        
+        for i in range(n_points):
+            if i in processed_indices:
+                continue
+                
+            # 找到包含当前索引的合并组
+            merge_group = None
+            for group in to_merge:
+                if i in group:
+                    merge_group = group
+                    break
+            
+            if merge_group and len(merge_group) > 1:
+                # 计算合并组的平均位置
+                group_points = points[merge_group]
+                merged_point = np.mean(group_points, axis=0)
+                merged_vertices.append(merged_point)
+                
+                # 标记这些索引为已处理
+                for idx in merge_group:
+                    processed_indices.add(idx)
+            else:
+                # 保持原有顶点
+                merged_vertices.append(points[i])
+                processed_indices.add(i)
+        
+        # 转换回OpenCV格式
+        if len(merged_vertices) == 0:
+            return vertices
+            
+        result = np.array([[[int(point[0]), int(point[1])]] for point in merged_vertices])
+        return result
+
     def detect_polygons(self, frame):
         """主要的多边形检测方法"""
         self.image_shape = frame.shape
@@ -182,10 +258,12 @@ class IntegratedPolygonSquareDetector:
         edges = self.preprocess_image(frame)
         contours, hierarchy = self.find_contours_with_hierarchy(edges)
         all_polygons, outer_polygons, inner_polygons = self.process_contours(contours, hierarchy)
-        self.merge_polygon_vertices(outer_polygons, inner_polygons)
-        
+
         self.outer_polygons = outer_polygons
         self.inner_polygons = inner_polygons
+        
+        # 保存检测到的所有顶点
+        self._save_detected_vertices()
         
         return outer_polygons, inner_polygons
     
@@ -558,6 +636,54 @@ class IntegratedPolygonSquareDetector:
         except Exception:
             return None
     
+    def _save_accepted_vertex(self, stage, coordinates, contour_id, vertex_id, reason):
+        """
+        保存被接受的单个顶点调试图像
+        
+        Args:
+            stage: 阶段名称
+            coordinates: 顶点坐标
+            contour_id: 轮廓ID
+            vertex_id: 顶点ID
+            reason: 接受原因
+        """
+        if self.debug_frame is None:
+            return
+        
+        # 创建调试图像
+        debug_img = self.debug_frame.copy()
+        
+        # 绘制外轮廓（绿色）
+        for poly in self.outer_polygons:
+            cv2.polylines(debug_img, [poly['approx']], True, (0, 255, 0), 2)
+        
+        # 绘制内轮廓（红色）
+        for poly in self.inner_polygons:
+            cv2.polylines(debug_img, [poly['approx']], True, (0, 0, 255), 2)
+        
+        # 突出显示被接受的顶点（绿色大圆点）
+        cv2.circle(debug_img, (int(coordinates[0]), int(coordinates[1])), 10, (0, 255, 0), -1)
+        
+        # 标记顶点编号
+        cv2.putText(debug_img, f"C{contour_id}V{vertex_id}", 
+                (int(coordinates[0])+15, int(coordinates[1])-15), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        
+        # 添加接受原因
+        cv2.putText(debug_img, f"Accept: {reason}", 
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+        cv2.putText(debug_img, f"Vertex C{contour_id}V{vertex_id} at {coordinates}", 
+                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+        
+        # 保存图像
+        counter = self.debug_counters[stage]
+        filename = os.path.join(self.debug_dirs[stage], f"{stage}_{counter:04d}.png")
+        cv2.imwrite(filename, debug_img)
+        print(f"保存调试图像: {filename}")
+        
+        # 递增计数器
+        self.debug_counters[stage] += 1
+
     def get_90_degree_vertices(self, angle_tolerance=15):
         """
         获取外轮廓中所有接近90度角的凸顶点
@@ -575,8 +701,14 @@ class IntegratedPolygonSquareDetector:
             n_vertices = len(vertices)
             
             for vertex_id in range(n_vertices):
+                coordinates = tuple(vertices[vertex_id][0])
+                
                 # 首先检查是否是凸点
-                if not self.is_convex_vertex('outer', contour_id, vertex_id):
+                is_convex = self.is_convex_vertex('outer', contour_id, vertex_id)
+                if not is_convex:
+                    # 保存被拒绝的非凸顶点
+                    self._save_debug_vertex('non_convex_vertices', coordinates, 
+                                          contour_id, vertex_id, 'Non-convex vertex')
                     continue
                 
                 # 然后检查角度
@@ -584,7 +716,6 @@ class IntegratedPolygonSquareDetector:
                 
                 if angle is not None:
                     angle_diff = abs(angle - 90.0)
-                    coordinates = tuple(vertices[vertex_id][0])
                     
                     if angle_diff <= angle_tolerance:
                         valid_vertices.append({
@@ -594,6 +725,15 @@ class IntegratedPolygonSquareDetector:
                             'coordinates': coordinates,
                             'is_convex': True  # 标记为凸点
                         })
+                        # 保存被采纳的90度角顶点
+                        self._save_accepted_vertex('accepted_vertices', coordinates,
+                                                 contour_id, vertex_id,
+                                                 f'Angle: {angle:.1f}° (diff: {angle_diff:.1f}°)')
+                    else:
+                        # 保存被拒绝的非90度顶点
+                        self._save_debug_vertex('non_90_degree_vertices', coordinates,
+                                              contour_id, vertex_id, 
+                                              f'Angle: {angle:.1f}° (diff: {angle_diff:.1f}°)')
         
         return valid_vertices
 
@@ -612,11 +752,12 @@ class IntegratedPolygonSquareDetector:
         
         # 遍历所有两点组合
         valid_combinations = []
-        rejected_count = 0
         
         for p1, p2 in combinations(vertex_coordinates, 2):
             # 检查连线是否在图形内部
             if not self.is_line_inside_shape(p1, p2):
+                # 保存被拒绝的线段（线段在形状外部）
+                self._save_debug_line('line_outside_shape', p1, p2, 'Line outside shape')
                 continue
             
             # 构造三个正方形
@@ -649,10 +790,13 @@ class IntegratedPolygonSquareDetector:
                     'squares': squares,
                     'square_results': square_results
                 })
+                # 保存被接受的组合
+                self._save_debug_combination('accepted_combinations', p1, p2, squares, square_results, 
+                                           f'Side length: {side_length:.2f}px')
             else:
-                # 绘制并保存被拒绝的正方形
-                self._save_rejected_square_debug(p1, p2, squares, square_results, rejected_count)
-                rejected_count += 1
+                # 保存被拒绝的正方形（正方形在多边形外部）
+                self._save_debug_combination('squares_outside_polygon', p1, p2, squares, square_results, 
+                                           'All squares outside polygon')
         
         if not valid_combinations:
             return None, None, float('inf'), []
@@ -665,15 +809,16 @@ class IntegratedPolygonSquareDetector:
                 min_combination['side_length'], 
                 valid_combinations)
     
-    def _save_rejected_square_debug(self, p1, p2, squares, square_results, index):
+    def _save_debug_vertex(self, stage, coordinates, contour_id, vertex_id, reason):
         """
-        保存被拒绝的正方形调试图像
+        保存被拒绝的单个顶点调试图像
         
         Args:
-            p1, p2: 线段端点
-            squares: 三个正方形列表
-            square_results: 正方形检测结果
-            index: 被拒绝的序号
+            stage: 阶段名称
+            coordinates: 顶点坐标
+            contour_id: 轮廓ID
+            vertex_id: 顶点ID
+            reason: 拒绝原因
         """
         if self.debug_frame is None:
             return
@@ -689,54 +834,227 @@ class IntegratedPolygonSquareDetector:
         for poly in self.inner_polygons:
             cv2.polylines(debug_img, [poly['approx']], True, (0, 0, 255), 2)
         
-        # 绘制线段（黄色）
+        # 突出显示被拒绝的顶点（红色大圆点）
+        cv2.circle(debug_img, (int(coordinates[0]), int(coordinates[1])), 10, (0, 0, 255), -1)
+        
+        # 标记顶点编号
+        cv2.putText(debug_img, f"C{contour_id}V{vertex_id}", 
+                   (int(coordinates[0])+15, int(coordinates[1])-15), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        
+        # 添加拒绝原因
+        cv2.putText(debug_img, f"Reject: {reason}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+        cv2.putText(debug_img, f"Vertex C{contour_id}V{vertex_id} at {coordinates}", 
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+        
+        # 保存图像
+        counter = self.debug_counters[stage]
+        filename = os.path.join(self.debug_dirs[stage], f"{stage}_{counter:04d}.png")
+        cv2.imwrite(filename, debug_img)
+        print(f"保存调试图像: {filename}")
+        
+        # 递增计数器
+        self.debug_counters[stage] += 1
+    
+    def _save_debug_line(self, stage, p1, p2, reason):
+        """
+        保存被拒绝的线段调试图像
+        
+        Args:
+            stage: 阶段名称
+            p1, p2: 线段端点
+            reason: 拒绝原因
+        """
+        if self.debug_frame is None:
+            return
+        
+        # 创建调试图像
+        debug_img = self.debug_frame.copy()
+        
+        # 绘制外轮廓（绿色）
+        for poly in self.outer_polygons:
+            cv2.polylines(debug_img, [poly['approx']], True, (0, 255, 0), 2)
+        
+        # 绘制内轮廓（红色）
+        for poly in self.inner_polygons:
+            cv2.polylines(debug_img, [poly['approx']], True, (0, 0, 255), 2)
+        
+        # 绘制被拒绝的线段（红色粗线）
         cv2.line(debug_img, 
                 (int(p1[0]), int(p1[1])), 
                 (int(p2[0]), int(p2[1])), 
-                (0, 255, 255), 2)
+                (0, 0, 255), 3)
         
-        # 绘制线段端点（黄色）
-        cv2.circle(debug_img, (int(p1[0]), int(p1[1])), 5, (0, 255, 255), -1)
-        cv2.circle(debug_img, (int(p2[0]), int(p2[1])), 5, (0, 255, 255), -1)
+        # 绘制线段端点（红色圆点）
+        cv2.circle(debug_img, (int(p1[0]), int(p1[1])), 6, (0, 0, 255), -1)
+        cv2.circle(debug_img, (int(p2[0]), int(p2[1])), 6, (0, 0, 255), -1)
+        
+        # 添加拒绝原因
+        cv2.putText(debug_img, f"Reject: {reason}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+        cv2.putText(debug_img, f"Line: {p1} -> {p2}", 
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+        
+        # 保存图像
+        counter = self.debug_counters[stage]
+        filename = os.path.join(self.debug_dirs[stage], f"{stage}_{counter:04d}.png")
+        cv2.imwrite(filename, debug_img)
+        print(f"保存调试图像: {filename}")
+        
+        # 递增计数器
+        self.debug_counters[stage] += 1
+    
+    def _save_debug_combination(self, stage, p1, p2, squares, square_results, reason):
+        """
+        保存组合调试图像（被拒绝的正方形或被接受的组合）
+        
+        Args:
+            stage: 阶段名称
+            p1, p2: 线段端点
+            squares: 三个正方形列表
+            square_results: 正方形检测结果
+            reason: 原因（拒绝原因或接受信息）
+        """
+        if self.debug_frame is None:
+            return
+        
+        # 创建调试图像
+        debug_img = self.debug_frame.copy()
+        
+        # 绘制外轮廓（绿色）
+        for poly in self.outer_polygons:
+            cv2.polylines(debug_img, [poly['approx']], True, (0, 255, 0), 2)
+        
+        # 绘制内轮廓（红色）
+        for poly in self.inner_polygons:
+            cv2.polylines(debug_img, [poly['approx']], True, (0, 0, 255), 2)
+        
+        # 选择线段和端点的颜色
+        line_color = (255, 0, 255) if stage == 'accepted_combinations' else (0, 0, 255)  # 紫色 vs 红色
+        
+        # 绘制线段
+        cv2.line(debug_img, 
+                (int(p1[0]), int(p1[1])), 
+                (int(p2[0]), int(p2[1])), 
+                line_color, 3)
+        
+        # 绘制线段端点
+        cv2.circle(debug_img, (int(p1[0]), int(p1[1])), 6, line_color, -1)
+        cv2.circle(debug_img, (int(p2[0]), int(p2[1])), 6, line_color, -1)
         
         # 绘制三个正方形，不同颜色
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # 蓝、绿、红
-        color_names = ['Blue', 'Green', 'Red']
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # 红、绿、蓝
+        color_names = ['Red', 'Green', 'Blue']
         
         for i, square in enumerate(squares):
             points = np.array([(int(x), int(y)) for x, y in square], np.int32)
-            cv2.polylines(debug_img, [points], True, colors[i], 2)
             
-            # 在正方形中心添加编号
-            center_x = int(sum(x for x, y in square) / 4)
-            center_y = int(sum(y for x, y in square) / 4)
-            cv2.putText(debug_img, f"S{i+1}", 
-                       (center_x-10, center_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors[i], 2)
-        
-        # 添加拒绝原因信息
-        y_offset = 30
-        cv2.putText(debug_img, f"Rejected Square Pair #{index}", 
-                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        y_offset += 30
-        
-        # 分析每个正方形的拒绝原因
-        for i, square in enumerate(squares):
-            is_any_inside = False
+            # 检查这个正方形是否在多边形内部
+            is_inside = False
             for result in square_results:
                 if result['square_index'] == i and result['is_inside']:
-                    is_any_inside = True
+                    is_inside = True
                     break
             
-            if not is_any_inside:
-                cv2.putText(debug_img, f"Square {i+1} ({color_names[i]}): Outside polygon", 
-                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors[i], 1)
-                y_offset += 25
+            # 选择线条样式：内部的用实线，外部的用虚线
+            if is_inside:
+                cv2.polylines(debug_img, [points], True, colors[i], 2)
+            else:
+                # 绘制虚线效果（通过多个小线段）
+                for j in range(len(points)):
+                    pt1 = points[j]
+                    pt2 = points[(j + 1) % len(points)]
+                    # 简单的虚线效果
+                    mid_pt = ((pt1[0] + pt2[0]) // 2, (pt1[1] + pt2[1]) // 2)
+                    cv2.line(debug_img, tuple(pt1), mid_pt, colors[i], 2)
+            
+            # 在正方形中心添加编号和状态
+            center_x = int(sum(x for x, y in square) / 4)
+            center_y = int(sum(y for x, y in square) / 4)
+            status = "IN" if is_inside else "OUT"
+            cv2.putText(debug_img, f"S{i+1}({status})", 
+                       (center_x-20, center_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, colors[i], 1)
+        
+        # 添加信息
+        info_color = (0, 255, 0) if stage == 'accepted_combinations' else (0, 0, 255)
+        cv2.putText(debug_img, reason, 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, info_color, 1)
+        cv2.putText(debug_img, f"Line: {p1} -> {p2}", 
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.3, info_color, 1)
         
         # 保存图像
-        filename = os.path.join(self.debug_dir, f"rejected_square_{index:03d}.png")
+        counter = self.debug_counters[stage]
+        filename = os.path.join(self.debug_dirs[stage], f"{stage}_{counter:04d}.png")
         cv2.imwrite(filename, debug_img)
-        print(f"保存被拒绝的正方形调试图像: {filename}")
+        print(f"保存调试图像: {filename}")
+        
+        # 递增计数器
+        self.debug_counters[stage] += 1
+
+    def _save_detected_vertices(self):
+        """
+        保存检测到的所有多边形顶点调试图像
+        """
+        if self.debug_frame is None:
+            return
+        
+        # 创建调试图像
+        debug_img = self.debug_frame.copy()
+        
+        # 绘制外轮廓（绿色）并标记顶点
+        for contour_id, poly in enumerate(self.outer_polygons):
+            vertices = poly['approx']
+            # 绘制轮廓
+            cv2.polylines(debug_img, [vertices], True, (0, 255, 0), 2)
+            
+            # 标记每个顶点
+            for vertex_id, vertex in enumerate(vertices):
+                coord = tuple(vertex[0])
+                # 绘制顶点（绿色圆点）
+                cv2.circle(debug_img, coord, 5, (0, 255, 0), -1)
+                # 添加顶点编号
+                cv2.putText(debug_img, f"O{contour_id}V{vertex_id}", 
+                           (coord[0]+8, coord[1]-8), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
+        
+        # 绘制内轮廓（红色）并标记顶点
+        for contour_id, poly in enumerate(self.inner_polygons):
+            vertices = poly['approx']
+            # 绘制轮廓
+            cv2.polylines(debug_img, [vertices], True, (0, 0, 255), 2)
+            
+            # 标记每个顶点
+            for vertex_id, vertex in enumerate(vertices):
+                coord = tuple(vertex[0])
+                # 绘制顶点（红色圆点）
+                cv2.circle(debug_img, coord, 5, (0, 0, 255), -1)
+                # 添加顶点编号
+                cv2.putText(debug_img, f"I{contour_id}V{vertex_id}", 
+                           (coord[0]+8, coord[1]-8), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
+        
+        # 添加统计信息
+        outer_vertex_count = sum(len(poly['approx']) for poly in self.outer_polygons)
+        inner_vertex_count = sum(len(poly['approx']) for poly in self.inner_polygons)
+        
+        cv2.putText(debug_img, f"Outer: {len(self.outer_polygons)}, Vertices: {outer_vertex_count}", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.putText(debug_img, f"Inner: {len(self.inner_polygons)}, Vertices: {inner_vertex_count}", 
+                   (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        cv2.putText(debug_img, f"Total Vertices: {outer_vertex_count + inner_vertex_count}", 
+                   (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # 保存图像
+        counter = self.debug_counters['detected_vertices']
+        filename = os.path.join(self.debug_dirs['detected_vertices'], f"detected_vertices_{counter:04d}.png")
+        cv2.imwrite(filename, debug_img)
+        print(f"保存检测到的顶点调试图像: {filename}")
+        
+        # 递增计数器
+        self.debug_counters['detected_vertices'] += 1
+
 
 def test_integrated_poly_detection():
     """测试集成的多边形检测和测量功能"""
