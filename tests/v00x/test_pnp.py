@@ -56,20 +56,20 @@ def test_border_detection():
                 cv2.polylines(edges_colored, [corners.astype(int)], True, (255, 0, 0), 2)
                 
                 # 使用PnP计算距离D
-                D, _ = system.distance_calculator.calculate_D(corners)
+                D, _ = system.distance_calculator.calculate_D(corners, system.K)
                 if D is None:
                     print("PnP求解失败")
                     cv2.putText(edges_colored, "PnP Failed", 
-                               (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                               (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
                 else:
                     print(f"检测到A4边框，距离: {D:.1f} cm")
                     # 在图像上显示距离
                     cv2.putText(edges_colored, f"Distance: {D:.1f} cm", 
-                               (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                               (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
             else:
                 print("无法检测A4边框")
                 cv2.putText(edges_colored, "No A4 border detected", 
-                           (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                           (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             
             # 显示图像
             cv2.imshow("Original Frame", cropped_frame)

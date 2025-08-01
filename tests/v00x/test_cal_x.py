@@ -58,7 +58,7 @@ def test_shape_detection():
             post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
             
             # 使用PnP计算距离D
-            D, _ = system.distance_calculator.calculate_D(corners)
+            D, _ = system.distance_calculator.calculate_D(corners, system.K)
             if D is None:
                 print("PnP求解失败")
                 cv2.imshow("Shape Detection", post_cropped_frame)
