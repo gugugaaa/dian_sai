@@ -343,7 +343,7 @@ class DigitDetectionAlgorithm:
             **kwargs: 可调参数
                 - model_path: 模型文件路径 (默认: 'models/improved_mnist_model.pth')
                 - filter_window_size: 移动平均值窗口大小 (默认: 10)
-                - confidence_threshold: 置信度阈值 (默认: 0.5)
+                - confidence_threshold: 置信度阈值 (默认: 0.7)
                 - inset_pixels: 内边距裁切像素 (默认: 5)
                 - target_height: 数字目标高度 (默认: 20)
                 - upscale_factor: 图像放大倍数 (默认: 5)
@@ -361,7 +361,7 @@ class DigitDetectionAlgorithm:
         self.config = {
             'model_path': kwargs.get('model_path', 'models/improved_mnist_model.pth'),
             'filter_window_size': kwargs.get('filter_window_size', 10),
-            'confidence_threshold': kwargs.get('confidence_threshold', 0.5),
+            'confidence_threshold': kwargs.get('confidence_threshold', 0.8),
             'inset_pixels': kwargs.get('inset_pixels', 5),
             'target_height': kwargs.get('target_height', 20),
             'upscale_factor': kwargs.get('upscale_factor', 5),

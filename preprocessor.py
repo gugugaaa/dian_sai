@@ -122,8 +122,10 @@ class Preprocessor:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # 应用高斯模糊降噪
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        # 使用二值化
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         # 边缘检测
-        edges = cv2.Canny(blurred, 50, 150)
+        edges = cv2.Canny(binary, 50, 150)
         # 查找轮廓，使用RETR_TREE获取层次结构
         # ！！重要：找到的通常是A4纸黑边的内轮廓
         contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -238,7 +240,7 @@ class Preprocessor:
         x, y, w, h = self.current_crop_region
         
         # 裁剪图像，添加一些边距以确保完整
-        margin = 20
+        margin = 10
         frame_height, frame_width = frame.shape[:2]
         
         # 确保裁切区域在图像范围内

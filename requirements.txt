@@ -7,3 +7,4 @@ tensorflow
 torchvision
 torch
 tqdm
+pyserial

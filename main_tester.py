@@ -1,9 +1,4 @@
 # main_tester.py
-import sys
-import os
-# 如果你的项目结构需要，请保留这个路径添加
-# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-
 import cv2
 import numpy as np
 
@@ -79,7 +74,7 @@ def main():
                 if handle_key_press(cv2.waitKey(1), current_mode, algorithms, stabilizer) == 'exit': break
                 continue
             
-            post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=5)
+            post_cropped_frame, adjusted_corners = system.border_detector.post_crop(cropped_frame, corners, inset_pixels=2)
             D_raw, _ = system.distance_calculator.calculate_D(corners, system.K)
             if D_raw is None:
                 cv2.imshow("Result", post_cropped_frame)

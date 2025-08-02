@@ -46,7 +46,7 @@ class BorderDetector:
     
     def _detect_border_internal(self, edges, frame):
         """
-        内部边框检测逻辑（原来的detect_border逻辑）
+        A4纸黑边的内边框检测逻辑
         """
         # 查找轮廓
         contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
