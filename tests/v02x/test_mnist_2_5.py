@@ -70,7 +70,7 @@ class ImprovedCNN(nn.Module):
         x = self.classifier(x)
         return x
 
-class MNISTDigitRecognizer:
+class DigitRecognizer:
     """改进的MNIST数字识别器"""
     def __init__(self):
         # 检查模型文件是否存在
@@ -381,7 +381,7 @@ def main():
         return
     
     try:
-        recognizer = MNISTDigitRecognizer()
+        recognizer = DigitRecognizer()
         extractor = DigitExtractor(recognizer)
         print("数字识别系统初始化成功")
     except FileNotFoundError as e:
