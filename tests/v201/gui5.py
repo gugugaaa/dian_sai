@@ -105,9 +105,10 @@ class DigitKeypadDialog:
     def __init__(self, parent):
         self.parent = parent
         self.selected_digit = None
+        self.confirmed = False
         self.dialog = tk.Toplevel(parent)
         self.dialog.title("选择要测量的数字")
-        self.dialog.geometry("300x400")
+        self.dialog.geometry("300x450")
         self.dialog.transient(parent)
         self.dialog.grab_set()
         
@@ -147,206 +148,267 @@ class DigitKeypadDialog:
                          width=8)
         btn_0.grid(row=3, column=1, padx=5, pady=5, ipadx=10, ipady=10)
         
+        # 显示当前选择的数字
+        self.selected_label = ttk.Label(self.dialog, text="未选择", font=("Arial", 12, "bold"))
+        self.selected_label.pack(pady=10)
+        
+        # 按钮框架
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(pady=20)
+        
+        # 确定按钮
+        confirm_btn = ttk.Button(button_frame, text="确定", command=self.on_confirm)
+        confirm_btn.pack(side=tk.LEFT, padx=10)
+        
         # 取消按钮
-        cancel_btn = ttk.Button(self.dialog, text="取消", command=self.on_cancel)
-        cancel_btn.pack(pady=20)
+        cancel_btn = ttk.Button(button_frame, text="取消", command=self.on_cancel)
+        cancel_btn.pack(side=tk.LEFT, padx=10)
         
     def on_digit_click(self, digit):
         self.selected_digit = digit
-        self.dialog.destroy()
+        self.selected_label.config(text=f"已选择: {digit}")
         
+    def on_confirm(self):
+        if self.selected_digit is not None:
+            self.confirmed = True
+            self.dialog.destroy()
+        else:
+            messagebox.showwarning("警告", "请先选择一个数字!")
+            
     def on_cancel(self):
         self.selected_digit = None
+        self.confirmed = False
         self.dialog.destroy()
         
     def get_digit(self):
         self.dialog.wait_window()
-        return self.selected_digit
-
-class DigitMatcher:
-    """处理数字匹配和排除法逻辑"""
-    def __init__(self, timeout_seconds=10):
-        self.timeout_seconds = timeout_seconds
-        self.recognized_digits_history = []  # 存储历史识别结果
-        self.target_digit = None
-        self.start_time = None
-        
-    def set_target_digit(self, digit):
-        """设置目标数字并重置计时器"""
-        self.target_digit = digit
-        self.start_time = time.time()
-        self.recognized_digits_history.clear()
-        
-    def add_recognition_result(self, result):
-        """添加新的识别结果"""
-        if result.get('squares'):
-            recognized_digits = []
-            for sq in result['squares']:
-                if sq.get('recognition_success') and not sq.get('filtered_out'):
-                    recognized_digits.append({
-                        'digit': sq.get('digit'),
-                        'size_cm': sq.get('size_cm'),
-                        'confidence': sq.get('confidence', 0)
-                    })
-            if recognized_digits:
-                self.recognized_digits_history.append({
-                    'timestamp': time.time(),
-                    'digits': recognized_digits
-                })
-    
-    def find_match(self):
-        """尝试找到匹配的数字"""
-        if self.target_digit is None:
-            return None, "no_target"
-            
-        # 检查是否超时
-        if time.time() - self.start_time > self.timeout_seconds:
-            return self._apply_exclusion_method(), "exclusion"
-        
-        # 首先尝试直接匹配
-        for record in reversed(self.recognized_digits_history[-5:]):  # 只看最近5次
-            for digit_info in record['digits']:
-                if digit_info['digit'] == self.target_digit:
-                    return digit_info['size_cm'], "direct"
-        
-        return None, "waiting"
-    
-    def _apply_exclusion_method(self):
-        """应用排除法"""
-        if not self.recognized_digits_history:
+        if self.confirmed:
+            return self.selected_digit
+        else:
             return None
-            
-        # 获取最新的识别结果
-        latest = self.recognized_digits_history[-1]['digits']
-        
-        # 统计所有历史识别中出现的数字
-        all_recognized = set()
-        for record in self.recognized_digits_history:
-            for digit_info in record['digits']:
-                all_recognized.add(digit_info['digit'])
-        
-        # 找出可能是误识别的数字（不应该出现的）
-        # 假设真实数字集合是连续的或有规律的
-        potential_misrecognitions = []
-        
-        for digit_info in latest:
-            # 如果这个数字很少出现，可能是误识别
-            occurrences = sum(1 for record in self.recognized_digits_history 
-                            for d in record['digits'] if d['digit'] == digit_info['digit'])
-            if occurrences < len(self.recognized_digits_history) * 0.3:  # 出现率低于30%
-                potential_misrecognitions.append(digit_info)
-        
-        # 如果有潜在的误识别，返回其中一个的尺寸
-        if potential_misrecognitions:
-            # 选择置信度最低的作为目标
-            return min(potential_misrecognitions, key=lambda x: x.get('confidence', 1))['size_cm']
-        
-        # 否则返回任意一个
-        if latest:
-            return latest[0]['size_cm']
-            
-        return None
 
-class DisplayAggregator:
+class OneSecondDisplayAggregator:
     """
-    负责在UI上显示数值前的最后一道稳定关卡。
-    它在设定的时间窗口内收集数据，并仅在某个值足够"稳定"（出现频率够高）时才提供它。
+    新的显示聚合器：所有模式都监听1秒钟，根据不同模式采用不同的稳定策略
     """
-    def __init__(self, window_seconds=1, stable_threshold_percent=50):
-        self.window_seconds = window_seconds
-        self.stable_threshold = stable_threshold_percent / 100.0
-        self.history = {
-            'size_cm': [],
-            'distance_cm': []
+    def __init__(self, monitoring_duration=1.0):
+        self.monitoring_duration = monitoring_duration  # 监听时长（秒）
+        self.monitoring_start_time = None
+        self.is_monitoring = False
+        self.current_mode = None
+        self.target_digit = None  # 用于数字模式
+        
+        # 收集的数据
+        self.collected_data = {
+            'distance_values': [],  # (timestamp, value)
+            'size_values': [],      # (timestamp, value) for single/overlap
+            'digit_data': []        # (timestamp, digit_info) for digit mode
         }
-        # 锁定状态：一旦显示了稳定值，就锁定不再更新
-        self.locked_values = {
-            'size_cm': None,
-            'distance_cm': None
+        
+        # 最终稳定的结果
+        self.stable_result = {
+            'distance_cm': None,
+            'size_cm': None
         }
-        self.is_locked = False
 
-    def add_result(self, result_dict, mode):
-        """根据传入的算法结果，提取关键信息并记录下来"""
-        # 如果已经锁定，就不再接受新的结果
-        if self.is_locked:
+    def start_monitoring(self, mode, target_digit=None):
+        """开始监听1秒钟"""
+        print(f"开始监听模式: {mode}, 目标数字: {target_digit}")
+        self.monitoring_start_time = time.time()
+        self.is_monitoring = True
+        self.current_mode = mode
+        self.target_digit = target_digit
+        
+        # 清空之前的数据
+        for key in self.collected_data:
+            self.collected_data[key].clear()
+        
+        # 重置结果
+        self.stable_result = {
+            'distance_cm': None,
+            'size_cm': None
+        }
+
+    def add_data(self, result_dict, mode):
+        """添加数据到监听缓冲区"""
+        if not self.is_monitoring or mode != self.current_mode:
             return
             
         current_time = time.time()
-
-        # 记录距离
+        
+        # 收集距离数据
         if result_dict.get('statistics', {}).get('distance_filtered') is not None:
             dist = result_dict['statistics']['distance_filtered']
-            self.history['distance_cm'].append((current_time, dist))
-
-        # 根据模式记录尺寸
-        if mode == 'single' and result_dict.get('shape', {}).get('size_cm') is not None:
-            size = result_dict['shape']['size_cm']
-            self.history['size_cm'].append((current_time, size))
+            self.collected_data['distance_values'].append((current_time, dist))
         
-        elif mode == 'overlap' and result_dict.get('squares') and result_dict['squares'][0].get('size_cm') is not None:
-            size = result_dict['squares'][0]['size_cm']
-            self.history['size_cm'].append((current_time, size))
+        # 根据模式收集尺寸数据
+        if mode == 'single':
+            if result_dict.get('shape', {}).get('size_cm') is not None:
+                size = result_dict['shape']['size_cm']
+                self.collected_data['size_values'].append((current_time, size))
+                
+        elif mode == 'overlap':
+            if result_dict.get('squares') and result_dict['squares'][0].get('size_cm') is not None:
+                size = result_dict['squares'][0]['size_cm']
+                self.collected_data['size_values'].append((current_time, size))
+                
+        elif mode == 'digit':
+            if result_dict.get('squares'):
+                for sq in result_dict['squares']:
+                    if sq.get('recognition_success') and not sq.get('filtered_out'):
+                        digit_info = {
+                            'digit': sq.get('digit'),
+                            'size_cm': sq.get('size_cm'),
+                            'confidence': sq.get('confidence', 0)
+                        }
+                        self.collected_data['digit_data'].append((current_time, digit_info))
 
-        # 数字模式现在由专门的逻辑处理，不在这里处理
+    def check_monitoring_complete(self):
+        """检查监听是否完成，如果完成则计算稳定结果"""
+        if not self.is_monitoring:
+            return False
+            
+        elapsed = time.time() - self.monitoring_start_time
+        if elapsed >= self.monitoring_duration:
+            self._calculate_stable_results()
+            self.is_monitoring = False
+            print(f"监听完成，稳定结果: {self.stable_result}")
+            return True
+        return False
 
-    def add_size_value(self, size_cm):
-        """直接添加尺寸值（用于数字识别模式）"""
-        if self.is_locked:
+    def _calculate_stable_results(self):
+        """根据模式计算稳定的结果"""
+        # 1. 处理距离 - 所有模式都求平均值
+        if self.collected_data['distance_values']:
+            distances = [v for t, v in self.collected_data['distance_values']]
+            self.stable_result['distance_cm'] = sum(distances) / len(distances)
+        
+        # 2. 根据模式处理尺寸
+        if self.current_mode == 'single':
+            self._process_single_mode()
+        elif self.current_mode == 'overlap':
+            self._process_overlap_mode()
+        elif self.current_mode == 'digit':
+            self._process_digit_mode()
+
+    def _process_single_mode(self):
+        """single模式：求平均值"""
+        if self.collected_data['size_values']:
+            sizes = [v for t, v in self.collected_data['size_values']]
+            self.stable_result['size_cm'] = sum(sizes) / len(sizes)
+            print(f"Single模式: 平均尺寸 {self.stable_result['size_cm']:.2f}cm")
+
+    def _process_overlap_mode(self):
+        """overlap模式：找符合6-12范围的、出现过的最小的"""
+        if self.collected_data['size_values']:
+            sizes = [v for t, v in self.collected_data['size_values']]
+            # 筛选6-12范围内的值
+            valid_sizes = [s for s in sizes if 6 <= s <= 12]
+            if valid_sizes:
+                self.stable_result['size_cm'] = min(valid_sizes)
+                print(f"Overlap模式: 6-12范围内最小值 {self.stable_result['size_cm']:.2f}cm")
+            else:
+                # 如果没有6-12范围内的值，取所有值的最小值
+                self.stable_result['size_cm'] = min(sizes)
+                print(f"Overlap模式: 无6-12范围值，取最小值 {self.stable_result['size_cm']:.2f}cm")
+
+    def _process_digit_mode(self):
+        """digit模式：复杂的跳变处理逻辑"""
+        if not self.collected_data['digit_data']:
+            print("Digit模式: 无识别数据")
             return
-        current_time = time.time()
-        self.history['size_cm'].append((current_time, size_cm))
-
-    def get_stable_values(self):
-        """分析历史记录，返回稳定的值"""
-        # 如果已经锁定，直接返回锁定的值
-        if self.is_locked:
-            return self.locked_values.copy()
             
-        current_time = time.time()
-        stable_values = {}
-
-        # 1. 清理过期数据
-        for key in self.history:
-            self.history[key] = [(t, v) for t, v in self.history[key] if current_time - t < self.window_seconds]
-
-        # 2. 计算稳定值
-        for key, records in self.history.items():
-            if not records:
-                stable_values[key] = None
-                continue
-
-            values = [v for t, v in records]
+        # 提取所有识别的数字和尺寸
+        all_digits = []
+        digit_sizes = {}  # digit -> [sizes]
+        
+        for timestamp, digit_info in self.collected_data['digit_data']:
+            digit = digit_info['digit']
+            size = digit_info['size_cm']
+            all_digits.append(digit)
             
-            # 对连续值（如尺寸和距离）进行处理
-            if key in ['size_cm', 'distance_cm']:
-                # 策略：使用滑动窗口内的平均值作为稳定值
-                # 只有当窗口内有足够样本时才更新
-                if len(values) > 3: # 需要至少3个样本
-                    stable_values[key] = sum(values) / len(values)
-                else:
-                    stable_values[key] = None
+            if digit not in digit_sizes:
+                digit_sizes[digit] = []
+            digit_sizes[digit].append(size)
         
-        # 检查是否应该锁定值
-        if (stable_values.get('size_cm') is not None and 
-            stable_values.get('distance_cm') is not None):
-            # 都有稳定值了，锁定这些值
-            self.locked_values = stable_values.copy()
-            self.is_locked = True
-            print(f"数值已锁定: 距离={self.locked_values['distance_cm']:.2f}cm, 尺寸={self.locked_values['size_cm']:.2f}cm")
+        if not all_digits:
+            print("Digit模式: 无有效数字")
+            return
+            
+        digit_counts = Counter(all_digits)
+        unique_digits = set(all_digits)
         
-        return stable_values
+        print(f"Digit模式分析: 数字频率 {dict(digit_counts)}, 目标数字 {self.target_digit}")
+        
+        # 情况1: 如果全程是某个数字（或者由于阈值过滤没识别到任何数字）
+        if len(unique_digits) == 1:
+            digit = list(unique_digits)[0]
+            avg_size = sum(digit_sizes[digit]) / len(digit_sizes[digit])
+            self.stable_result['size_cm'] = avg_size
+            print(f"Digit模式: 全程单一数字 {digit}, 尺寸 {avg_size:.2f}cm")
+            return
+            
+        # 情况2: 如果这1秒内，出现了5-9之间的跳变
+        high_digits = [d for d in unique_digits if 5 <= d <= 9]
+        low_digits = [d for d in unique_digits if d in [3, 4]]
+        
+        if high_digits:
+            # 情况2.1: 如果出现了5-9之间的跳变夹杂着3或者4，那么就采用3或4
+            if low_digits:
+                preferred_digit = low_digits[0]  # 优选3或4
+                avg_size = sum(digit_sizes[preferred_digit]) / len(digit_sizes[preferred_digit])
+                self.stable_result['size_cm'] = avg_size
+                print(f"Digit模式: 5-9跳变夹杂3/4，优选 {preferred_digit}, 尺寸 {avg_size:.2f}cm")
+                return
+            
+            # 情况2.2: 如果这1秒内，出现了5-9之间的跳变，就用出现次数最多的
+            most_common_digit = max(high_digits, key=lambda d: digit_counts[d])
+            avg_size = sum(digit_sizes[most_common_digit]) / len(digit_sizes[most_common_digit])
+            self.stable_result['size_cm'] = avg_size
+            print(f"Digit模式: 5-9跳变，最多次数 {most_common_digit}, 尺寸 {avg_size:.2f}cm")
+            return
+            
+        # 情况3: 如果场内只有6或者9中的一个，那么把用户输入的6或者9定位到那个正方形
+        if self.target_digit in [6, 9]:
+            six_nine_digits = [d for d in unique_digits if d in [6, 9]]
+            if len(six_nine_digits) == 1:
+                found_digit = six_nine_digits[0]
+                avg_size = sum(digit_sizes[found_digit]) / len(digit_sizes[found_digit])
+                self.stable_result['size_cm'] = avg_size
+                print(f"Digit模式: 场内只有6/9之一({found_digit})，定位用户目标 {self.target_digit}, 尺寸 {avg_size:.2f}cm")
+                return
+        
+        # 情况4: 最后用排除法 - 取出现频率最低的（可能是误识别）
+        least_common_digit = min(unique_digits, key=lambda d: digit_counts[d])
+        avg_size = sum(digit_sizes[least_common_digit]) / len(digit_sizes[least_common_digit])
+        self.stable_result['size_cm'] = avg_size
+        print(f"Digit模式: 排除法，最少次数 {least_common_digit}, 尺寸 {avg_size:.2f}cm")
+
+    def get_result(self):
+        """获取稳定的结果"""
+        return self.stable_result.copy()
+
+    def is_result_ready(self):
+        """检查结果是否准备好"""
+        return (not self.is_monitoring and 
+                self.stable_result['distance_cm'] is not None and 
+                self.stable_result['size_cm'] is not None)
 
     def reset(self):
-        """清空所有历史记录并解锁"""
-        for key in self.history:
-            self.history[key].clear()
-        self.locked_values = {
-            'size_cm': None,
-            'distance_cm': None
+        """重置聚合器"""
+        self.is_monitoring = False
+        self.monitoring_start_time = None
+        self.current_mode = None
+        self.target_digit = None
+        
+        for key in self.collected_data:
+            self.collected_data[key].clear()
+            
+        self.stable_result = {
+            'distance_cm': None,
+            'size_cm': None
         }
-        self.is_locked = False
-        print("显示聚合器已重置并解锁")
+        print("1秒监听聚合器已重置")
 
 class MeasurementApp:
     def __init__(self, root_window):
@@ -361,8 +423,8 @@ class MeasurementApp:
         
         # 数字识别模式相关
         self.digit_mode_active = False
-        self.digit_matcher = DigitMatcher()
-        self.waiting_for_digit = False
+        self.target_digit = None
+        self.waiting_for_measurement = False
 
         # 串口数据处理器
         self.serial_processor = SerialDataProcessor()
@@ -378,7 +440,7 @@ class MeasurementApp:
             }
             self.stabilizer = ResultStabilizer()
             self.drawer = DrawingUtils()
-            self.aggregator = DisplayAggregator()
+            self.aggregator = OneSecondDisplayAggregator()  # 使用新的聚合器
             print("系统组件初始化成功。")
         except Exception as e:
             print(f"错误：系统初始化失败: {e}")
@@ -397,6 +459,9 @@ class MeasurementApp:
 
         # 启动UI更新循环
         self._update_gui()
+
+        # 初始化时启动默认模式
+        self._start_measurement_for_mode('single')
 
     def create_widgets(self):
         main_frame = ttk.Frame(self.root, padding="10")
@@ -438,14 +503,15 @@ class MeasurementApp:
 
         ttk.Separator(controls_frame, orient='horizontal').grid(row=len(mode_buttons), column=0, sticky='ew', pady=10)
 
+        # 只保留刷新按钮
         refresh_button = ttk.Button(controls_frame, text="刷新状态", command=self._refresh_all)
         refresh_button.grid(row=len(mode_buttons)+1, column=0, sticky='ew', padx=5, pady=5)
 
-        # 数字识别模式状态显示
-        self.digit_status_var = tk.StringVar(value="")
-        self.digit_status_label = ttk.Label(controls_frame, textvariable=self.digit_status_var, 
-                                          foreground="blue", wraplength=200)
-        self.digit_status_label.grid(row=len(mode_buttons)+2, column=0, sticky='ew', padx=5, pady=5)
+        # 状态显示
+        self.status_var = tk.StringVar(value="就绪")
+        self.status_label = ttk.Label(controls_frame, textvariable=self.status_var, 
+                                    foreground="blue", wraplength=200)
+        self.status_label.grid(row=len(mode_buttons)+2, column=0, sticky='ew', padx=5, pady=5)
 
         # 串口状态显示
         self.serial_status_var = tk.StringVar(value=f"串口: {SERIAL_PORT}")
@@ -464,54 +530,62 @@ class MeasurementApp:
             print(f"更新电学量显示时出错: {e}")
 
     def _on_mode_change(self):
+        """当模式改变时，直接启动新模式的测量"""
         new_mode = self.current_mode.get()
         print(f"\n切换到模式: [{new_mode}]")
-        self._reset_mode_state(new_mode)
-        
-        # 如果切换到数字识别模式，显示键盘
-        if new_mode == 'digit':
-            self.root.after(100, self._show_digit_keypad)
-            self.digit_mode_active = True
-        else:
-            self.digit_mode_active = False
-            self.waiting_for_digit = False
-            self.digit_status_var.set("")
+        self._reset_mode_state()
+        self._start_measurement_for_mode(new_mode)
 
-    def _show_digit_keypad(self):
-        """显示数字键盘并获取用户选择"""
-        keypad = DigitKeypadDialog(self.root)
-        selected_digit = keypad.get_digit()
-        
-        if selected_digit is not None:
-            print(f"用户选择了数字: {selected_digit}")
-            self.digit_matcher.set_target_digit(selected_digit)
-            self.waiting_for_digit = True
-            self.digit_status_var.set(f"正在寻找数字 {selected_digit}...")
+    def _start_measurement_for_mode(self, mode):
+        """为指定模式启动测量"""
+        if mode == 'digit':
+            # 数字识别模式需要先选择数字
+            keypad = DigitKeypadDialog(self.root)
+            selected_digit = keypad.get_digit()
+            
+            if selected_digit is not None:
+                self.target_digit = selected_digit
+                self.digit_mode_active = True
+                self.aggregator.start_monitoring(mode, selected_digit)
+                self.waiting_for_measurement = True
+                self.status_var.set(f"正在测量数字 {selected_digit}... (1秒)")
+            else:
+                self.status_var.set("已取消，恢复到单个形状模式")
+                # 如果用户取消了数字选择，回到单个形状模式
+                self.current_mode.set('single')
+                self._start_measurement_for_mode('single')
+                return
         else:
-            # 用户取消了，切换回单个形状模式
-            self.current_mode.set('single')
-            self.digit_mode_active = False
-            self.waiting_for_digit = False
+            # 其他模式直接开始
+            self.aggregator.start_monitoring(mode)
+            self.waiting_for_measurement = True
+            mode_names = {'single': '单个形状', 'overlap': '重叠正方形'}
+            self.status_var.set(f"正在测量 {mode_names.get(mode, mode)} 模式... (1秒)")
 
     def _refresh_all(self):
+        """刷新所有状态"""
         print("\n--- 正在刷新所有状态 ---")
         for mode in self.algorithms.keys():
             self.algorithms[mode].reset_filter()
             self.stabilizer.reset(mode)
         self.aggregator.reset()
-        self.digit_matcher = DigitMatcher()
-        self.waiting_for_digit = False
-        self.digit_status_var.set("")
+        self.digit_mode_active = False
+        self.target_digit = None
+        self.waiting_for_measurement = False
+        self.status_var.set("就绪")
         # 只重置距离和尺寸显示，保留电学量显示
         self.param_vars['距离 (cm)'].set('-')
         self.param_vars['边长/直径 (cm)'].set('-')
 
-    def _reset_mode_state(self, mode_name):
-        """重置特定模式的算法和稳定器，并清空聚合器"""
-        if mode_name in self.algorithms:
-            self.algorithms[mode_name].reset_filter()
-        self.stabilizer.reset(mode_name)
+    def _reset_mode_state(self):
+        """重置状态"""
+        for mode in self.algorithms.keys():
+            self.algorithms[mode].reset_filter()
+            self.stabilizer.reset(mode)
         self.aggregator.reset()
+        self.digit_mode_active = False
+        self.target_digit = None
+        self.waiting_for_measurement = False
         # 切换模式时只清空距离和尺寸显示
         self.param_vars['距离 (cm)'].set('-')
         self.param_vars['边长/直径 (cm)'].set('-')
@@ -540,7 +614,6 @@ class MeasurementApp:
                 D_corrected = D_raw 
 
                 # --- 算法处理 ---
-                
                 mode = self.current_mode.get()
                 active_algorithm = self.algorithms[mode]
                 raw_result = active_algorithm.process(post_cropped_frame, adjusted_corners, D_corrected, self.system.K)
@@ -549,11 +622,9 @@ class MeasurementApp:
                 stabilized_result = self.stabilizer.process(raw_result, mode)
                 
                 if stabilized_result.get('success', False):
-                    # 数字模式特殊处理
-                    if mode == 'digit' and self.waiting_for_digit:
-                        self.digit_matcher.add_recognition_result(stabilized_result)
-                    else:
-                        self.results_queue.put((stabilized_result, mode))
+                    # 如果正在监听，添加数据到聚合器
+                    if self.waiting_for_measurement:
+                        self.aggregator.add_data(stabilized_result, mode)
 
                 display_frame = self.drawer.draw(post_cropped_frame.copy(), stabilized_result, mode)
                 cv2.putText(display_frame, f"Mode: {mode.upper()}", (10, display_frame.shape[0] - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -570,62 +641,30 @@ class MeasurementApp:
         cv2.destroyAllWindows()
         print("处理线程已停止。")
 
-    
     def _update_gui(self):
-        """从队列中获取结果并更新UI"""
+        """更新GUI状态"""
         try:
-            # 处理数字识别模式
-            if self.digit_mode_active and self.waiting_for_digit:
-                size_cm, match_type = self.digit_matcher.find_match()
-                
-                if size_cm is not None:
-                    # 找到匹配
-                    if match_type == "direct":
-                        self.digit_status_var.set(f"找到数字 {self.digit_matcher.target_digit}!")
-                    elif match_type == "exclusion":
-                        self.digit_status_var.set(f"使用排除法确定数字 {self.digit_matcher.target_digit}")
-                    elif match_type == "six_nine_special":
-                        # 新增：6/9特殊匹配的状态显示
-                        self.digit_status_var.set(f"检测到唯一的6/9，自动匹配数字 {self.digit_matcher.target_digit}!")
+            # 检查1秒监听是否完成
+            if self.waiting_for_measurement:
+                if self.aggregator.check_monitoring_complete():
+                    # 监听完成，获取结果
+                    result = self.aggregator.get_result()
                     
-                    # 既然已经找到了确定的值，就应该直接显示，而不是再通过聚合器
-                    print(f"匹配成功: 类型={match_type}, 尺寸={size_cm:.2f}cm。直接更新UI。")
-                    self.param_vars['边长/直径 (cm)'].set(f"{size_cm:.2f}")
-
-                    # 为了防止后续数据覆盖，可以手动锁定聚合器的值
-                    self.aggregator.locked_values['size_cm'] = size_cm
-                    # 只有当距离值也稳定后才完全锁定
-                    # self.aggregator.is_locked = True 
-
-                    self.waiting_for_digit = False # 停止寻找
-                                            
-                elif match_type == "waiting":
-                    # 更新等待状态
-                    elapsed = time.time() - self.digit_matcher.start_time
-                    self.digit_status_var.set(f"正在寻找数字 {self.digit_matcher.target_digit}... ({elapsed:.1f}s)")
-            
-            # 处理其他模式 或 数字模式锁定后的距离更新
-            if not self.aggregator.is_locked:
-                # (这里的代码保持不变)
-                while not self.results_queue.empty():
-                    result, mode = self.results_queue.get_nowait()
-                    self.aggregator.add_result(result, mode)
-
-                stable_values = self.aggregator.get_stable_values()
-                
-                # 更新距离
-                dist = stable_values.get('distance_cm')
-                if dist is not None:
-                    self.param_vars['距离 (cm)'].set(f"{dist:.2f}")
-                
-                # 更新尺寸 (在非数字模式下)
-                size = stable_values.get('size_cm')
-                if size is not None and not self.digit_mode_active:
-                    self.param_vars['边长/直径 (cm)'].set(f"{size:.2f}")
-            else:
-                # 如果已锁定，清空队列但不处理结果
-                while not self.results_queue.empty():
-                    self.results_queue.get_nowait()
+                    if result['distance_cm'] is not None:
+                        self.param_vars['距离 (cm)'].set(f"{result['distance_cm']:.2f}")
+                    
+                    if result['size_cm'] is not None:
+                        self.param_vars['边长/直径 (cm)'].set(f"{result['size_cm']:.2f}")
+                    
+                    self.waiting_for_measurement = False
+                    self.status_var.set("测量完成")
+                else:
+                    # 更新监听进度
+                    if self.aggregator.is_monitoring:
+                        elapsed = time.time() - self.aggregator.monitoring_start_time
+                        remaining = max(0, self.aggregator.monitoring_duration - elapsed)
+                        mode_text = "数字" if self.digit_mode_active else self.current_mode.get()
+                        self.status_var.set(f"正在测量 {mode_text}... ({remaining:.1f}s)")
 
         except Exception as e:
             print(f"GUI更新时发生错误: {e}")

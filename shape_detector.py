@@ -99,39 +99,40 @@ class ShapeDetector:
         return shape, shape_params.astype(int)  # 返回int类型以保持一致性
 
     def _detect_circle(self, contour, blurred):
-            area = cv2.contourArea(contour)
-            perimeter = cv2.arcLength(contour, True)
-            if perimeter == 0:
-                return None, None
-            circularity = 4 * np.pi * area / (perimeter ** 2)
-            if circularity <= 0.75:
-                return None, None
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            return None, None
+        circularity = 4 * np.pi * area / (perimeter ** 2)
+        if circularity <= 0.75:
+            return None, None
 
-            (cx, cy), mr = cv2.minEnclosingCircle(contour)
-            cx, cy, mr = int(cx), int(cy), int(mr)
+        (cx, cy), mr = cv2.minEnclosingCircle(contour)
+        cx, cy, mr = int(cx), int(cy), int(mr)
 
-            h_circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=50,
-                                        param1=50, param2=25, minRadius=int(mr * 0.5), maxRadius=int(mr * 1.5))
-            best_center = (cx, cy)
-            best_radius = mr
-            if h_circles is not None:
-                h_circles = np.round(h_circles[0, :]).astype("int")
-                best_score = float('inf')
-                for (hx, hy, hr) in h_circles:
-                    dist = np.sqrt((hx - cx) ** 2 + (hy - cy) ** 2)
-                    rel_dist = dist / mr if mr > 0 else 0
-                    rel_r = abs(hr - mr) / mr if mr > 0 else 0
-                    score = rel_dist + rel_r
-                    if score < best_score:
-                        best_score = score
-                        best_center = (hx, hy)
-                        best_radius = hr
-                if best_score >= 0.3:
-                    best_center = (cx, cy)
-                    best_radius = mr
+        h_circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=50,
+                                    param1=50, param2=25, minRadius=int(mr * 0.5), maxRadius=int(mr * 1.5))
+        best_center = (cx, cy)
+        best_radius = mr
+        if h_circles is not None:
+            h_circles = np.round(h_circles[0, :]).astype("int")
+            best_score = float('inf')
+            for (hx, hy, hr) in h_circles:
+                dist = np.sqrt((hx - cx) ** 2 + (hy - cy) ** 2)
+                rel_dist = dist / mr if mr > 0 else 0
+                rel_r = abs(hr - mr) / mr if mr > 0 else 0
+                score = rel_dist + rel_r
+                if score < best_score:
+                    best_score = score
+                    best_center = (hx, hy)
+                    best_radius = hr
+            if best_score >= 0.3:
+                best_center = (cx, cy)
+                best_radius = mr
 
-            shape_params = {"center": best_center, "radius": best_radius}
-            return "circle", shape_params.astype(int)
+        # 确保返回的数据类型为整数
+        shape_params = {"center": (int(best_center[0]), int(best_center[1])), "radius": int(best_radius)}
+        return "circle", shape_params
 
     def _compute_line_intersections(self, lines, roi_offset):
         # 计算所有直线两两的交点（输入为rho, theta）

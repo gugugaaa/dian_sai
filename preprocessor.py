@@ -4,15 +4,15 @@ import numpy as np
 from collections import deque
 
 class Preprocessor:
-    def __init__(self, K, dist, update_interval=20, history_size=50):
+    def __init__(self, K, dist, update_interval=20, history_size=10):
         """
         初始化预处理器
         
         Args:
             K: 相机内参矩阵
             dist: 畸变系数
-            update_interval: 裁切区域更新间隔（帧数），默认5帧更新一次
-            history_size: 历史区域缓存大小，用于计算平均值，默认10个
+            update_interval: 裁切区域更新间隔（帧数），默认20帧更新一次
+            history_size: 历史区域缓存大小，用于计算平均值，默认10个（减少了缓存大小提高响应性）
         """
         self.K = K
         self.dist = dist
@@ -24,6 +24,11 @@ class Preprocessor:
         self.current_crop_region = None  # 当前使用的裁切区域 (x, y, w, h)
         self.region_history = deque(maxlen=history_size)  # 历史检测区域队列
         self.is_region_valid = False    # 当前区域是否有效
+        
+        # 新增：快速更新模式相关参数
+        self.fast_update_mode = False
+        self.fast_update_remaining = 0
+        self.last_detection_region = None  # 最新检测的区域，用于IoU计算
 
     def _calculate_rectangularity(self, contour):
         """
@@ -105,12 +110,11 @@ class Preprocessor:
         Returns:
             bool: 是否需要更新区域
         """
-        self.frame_count += 1
         return (self.frame_count % self.update_interval == 0) or (not self.is_region_valid)
 
     def _detect_crop_region(self, frame):
         """
-        检测新的裁切区域
+        检测新的裁切区域（改进版：直接使用Canny边缘检测）
         
         Args:
             frame: 输入帧
@@ -122,12 +126,9 @@ class Preprocessor:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # 应用高斯模糊降噪
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        # 使用二值化
-        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        # 边缘检测
-        edges = cv2.Canny(binary, 50, 150)
+        # 直接进行边缘检测（移除二值化步骤）
+        edges = cv2.Canny(blurred, 50, 150)
         # 查找轮廓，使用RETR_TREE获取层次结构
-        # ！！重要：找到的通常是A4纸黑边的内轮廓
         contours, hierarchy = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         
         # 筛选有效轮廓
@@ -140,38 +141,60 @@ class Preprocessor:
         x, y, w, h = cv2.boundingRect(largest_contour)
         return (x, y, w, h), True
 
-    def _is_region_reasonable(self, new_region):
+    def _calculate_iou(self, region1, region2):
         """
-        判断新检测的区域是否合理（与历史平均值差距不会太大）
+        计算两个区域的IoU (Intersection over Union)
         
         Args:
-            new_region: 新检测的区域 (x, y, w, h)
+            region1: 第一个区域 (x, y, w, h)
+            region2: 第二个区域 (x, y, w, h)
             
         Returns:
-            bool: 区域是否合理
+            float: IoU值，范围[0, 1]
         """
-        if not self.region_history:
-            return True  # 如果没有历史数据，接受任何合理区域
+        if region1 is None or region2 is None:
+            return 0.0
         
-        # 计算当前平均区域
-        avg_region = self._calculate_average_region()
-        if avg_region is None:
-            return True
+        x1, y1, w1, h1 = region1
+        x2, y2, w2, h2 = region2
         
-        # 计算新区域与平均区域的差异
-        x_diff = abs(new_region[0] - avg_region[0])
-        y_diff = abs(new_region[1] - avg_region[1])
-        w_diff = abs(new_region[2] - avg_region[2])
-        h_diff = abs(new_region[3] - avg_region[3])
+        # 计算交集
+        inter_x1 = max(x1, x2)
+        inter_y1 = max(y1, y2)
+        inter_x2 = min(x1 + w1, x2 + w2)
+        inter_y2 = min(y1 + h1, y2 + h2)
         
-        # 设置合理的阈值（可以根据实际情况调整）
-        max_position_diff = 50  # 位置差异阈值
-        max_size_diff = 100     # 尺寸差异阈值
+        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+            return 0.0
         
-        return (x_diff <= max_position_diff and 
-                y_diff <= max_position_diff and 
-                w_diff <= max_size_diff and 
-                h_diff <= max_size_diff)
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        
+        # 计算并集
+        area1 = w1 * h1
+        area2 = w2 * h2
+        union_area = area1 + area2 - inter_area
+        
+        if union_area == 0:
+            return 0.0
+        
+        iou = inter_area / union_area
+        return iou
+
+    def _is_dramatic_change(self, current_region, new_region, iou_threshold=0.9):
+        """
+        检测是否为大幅变化（IoU阈值改为0.9）
+        
+        Args:
+            current_region: 当前区域
+            new_region: 新检测的区域
+            iou_threshold: IoU阈值，默认0.9
+            
+        Returns:
+            tuple: (是否为大幅变化, IoU值)
+        """
+        iou = self._calculate_iou(current_region, new_region)
+        is_dramatic = iou < iou_threshold
+        return is_dramatic, iou
 
     def _calculate_average_region(self):
         """
@@ -189,22 +212,61 @@ class Preprocessor:
         
         return tuple(avg_region)
 
-    def _update_region_history(self, new_region):
+    def _enhanced_region_processing(self, new_region, detection_success):
         """
-        更新区域历史记录
+        简化的区域处理逻辑 - 修复跳动问题
         
         Args:
-            new_region: 新的区域 (x, y, w, h)
+            new_region: 新检测的区域
+            detection_success: 检测是否成功
+            
+        Returns:
+            bool: 是否更新成功
         """
-        # 只有当新区域合理时才添加到历史记录
-        if self._is_region_reasonable(new_region):
+        if not detection_success:
+            return False
+        
+        # 更新快速更新模式计数器
+        if self.fast_update_mode:
+            self.fast_update_remaining -= 1
+            if self.fast_update_remaining <= 0:
+                self.fast_update_mode = False
+        
+        # 检测大幅变化（只在非快速模式下检测）
+        if not self.fast_update_mode and self.current_crop_region:
+            is_dramatic, iou_value = self._is_dramatic_change(self.current_crop_region, new_region)
+            
+            if is_dramatic:
+                # IoU过低，检测到大幅变化，启动快速更新模式
+                self.fast_update_mode = True
+                self.fast_update_remaining = 3  # 持续3帧
+        
+        # 区域更新逻辑
+        if self.fast_update_mode:
+            # 快速模式：直接使用新区域
+            self.current_crop_region = new_region
+            self.is_region_valid = True
+            
+            # 清空历史记录，避免平均化影响
+            self.region_history.clear()
             self.region_history.append(new_region)
-            return True
-        return False
+            
+        else:
+            # 正常模式：直接使用新区域，无合理性检查
+            if len(self.region_history) >= 3:  # 减少历史记录数量，提高响应性
+                self.region_history.popleft()
+            self.region_history.append(new_region)
+            
+            # 简化的平均化：只使用最近几个区域
+            avg_region = self._calculate_average_region()
+            self.current_crop_region = avg_region
+            self.is_region_valid = True
+        
+        return True
 
     def pre_crop(self, frame):
         """
-        预裁剪图像，带防抖动功能（使用平均值更新）
+        预裁剪图像，带防抖动功能（改进版）
         
         Args:
             frame: 输入帧
@@ -212,26 +274,19 @@ class Preprocessor:
         Returns:
             tuple: (裁剪后的图像, 是否成功)
         """
+        # 更新帧计数
+        self.frame_count += 1
+        
         # 检查是否需要更新裁切区域
         if self._should_update_region():
             new_region, detection_success = self._detect_crop_region(frame)
             
+            # 保存最新检测结果用于IoU计算
             if detection_success:
-                # 尝试更新历史记录
-                if self._update_region_history(new_region):
-                    # 计算新的平均区域
-                    avg_region = self._calculate_average_region()
-                    if avg_region is not None:
-                        self.current_crop_region = avg_region
-                        self.is_region_valid = True
-                elif not self.is_region_valid:
-                    # 如果没有有效区域且新区域不合理，直接使用新区域
-                    self.region_history.append(new_region)
-                    self.current_crop_region = new_region
-                    self.is_region_valid = True
-            elif not self.is_region_valid:
-                # 如果检测失败且没有有效的区域，返回失败
-                return None, False
+                self.last_detection_region = new_region
+            
+            # 使用改进的区域处理逻辑
+            self._enhanced_region_processing(new_region, detection_success)
         
         # 使用当前区域进行裁切
         if not self.is_region_valid or self.current_crop_region is None:
@@ -281,6 +336,10 @@ class Preprocessor:
         self.is_region_valid = False
         self.frame_count = 0
         self.region_history.clear()
+        # 重置快速更新模式
+        self.fast_update_mode = False
+        self.fast_update_remaining = 0
+        self.last_detection_region = None
 
     def get_region_stats(self):
         """
@@ -293,5 +352,8 @@ class Preprocessor:
             'current_region': self.current_crop_region,
             'history_count': len(self.region_history),
             'is_valid': self.is_region_valid,
-            'frame_count': self.frame_count
+            'frame_count': self.frame_count,
+            'fast_update_mode': self.fast_update_mode,
+            'fast_update_remaining': self.fast_update_remaining,
+            'last_detection_iou': self._calculate_iou(self.current_crop_region, self.last_detection_region) if self.current_crop_region and self.last_detection_region else 0.0
         }
